@@ -17,6 +17,7 @@ use ir::types::IRMap;
 use loaders::types::{ExecutableType, VwArch, VwMetadata, VwModule};
 use petgraph::graphmap::GraphMap;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::ops::Range;
 use yaxpeax_core::analyses::control_flow::{VW_Block, VW_CFG};
 use yaxpeax_core::memory::repr::process::{ModuleData, ModuleInfo, Segment};
@@ -206,10 +207,11 @@ pub fn validate_heap(
         metadata: module.metadata.clone(),
     };
     let heap_result = run_worklist(&cfg, &irmap, &heap_analyzer);
-    // let heap_safe = check_heap(heap_result, &irmap, &heap_analyzer);
-    // if !heap_safe {
-    //     return Err(ValidationError::HeapUnsafe);
-    // }
+    let name_addr_map = HashMap::new();
+    let heap_safe = check_heap(heap_result, &irmap, &heap_analyzer, &name_addr_map);
+    if !heap_safe {
+        return Err(ValidationError::HeapUnsafe);
+    }
 
     Ok(())
 }
