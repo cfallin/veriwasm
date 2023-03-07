@@ -128,9 +128,16 @@ pub fn run_worklist<T: AbstractAnalyzer<State>, State: VarState + Lattice + Clon
     worklist.push_back(cfg.entrypoint);
     statemap.insert(cfg.entrypoint, analyzer.init_state());
 
+    log::debug!(
+        "Starting worklist: entry = 0x{:x} IRMap = {:?}",
+        cfg.entrypoint,
+        irmap
+    );
     while !worklist.is_empty() {
         let addr = worklist.pop_front().unwrap();
+        log::debug!("Block worklist: 0x{:x}", addr);
         let irblock = irmap.get(&addr).unwrap();
+        log::debug!(" -> IR block: {:?}", irblock);
         let state = statemap.get(&addr).unwrap();
         let new_state = analyzer.analyze_block(state, irblock);
         let succ_addrs_unaligned: Vec<u64> = cfg.graph.neighbors(addr).collect();

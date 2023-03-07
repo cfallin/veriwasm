@@ -65,7 +65,9 @@ fn func_body_and_bbs_to_cfg(
     // algorithm that has to analyze the machine code and compute
     // reaching-defs in a fixpoint loop.
     let mut cfg = VW_CFG {
-        entrypoint: 0,
+        // First block is always the entry point. Its offset is likely
+        // not 0, because there will likely be a prologue first.
+        entrypoint: basic_blocks[0] as u64,
         blocks: BTreeMap::new(),
         graph: GraphMap::new(),
     };
