@@ -71,6 +71,11 @@ impl<T: Lattice + Clone> StackLattice<T> {
     }
 
     pub fn update_stack_offset(&mut self, adjustment: i64) -> () {
+        log::debug!(
+            "update_stack_offset: adjustment = {}; now {}",
+            adjustment,
+            self.offset + adjustment,
+        );
         if (adjustment & 3) != 0 {
             panic!("Unsafe: Attempt to make stack not 4-byte aligned.");
         }

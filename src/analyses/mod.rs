@@ -139,6 +139,7 @@ pub fn run_worklist<T: AbstractAnalyzer<State>, State: VarState + Lattice + Clon
         let irblock = irmap.get(&addr).unwrap();
         log::debug!(" -> IR block: {:?}", irblock);
         let state = statemap.get(&addr).unwrap();
+        log::debug!(" -> block state: {:?}", state);
         let new_state = analyzer.analyze_block(state, irblock);
         let succ_addrs_unaligned: Vec<u64> = cfg.graph.neighbors(addr).collect();
         let succ_addrs: Vec<u64> = align_succ_addrs(addr, succ_addrs_unaligned);
@@ -147,7 +148,10 @@ pub fn run_worklist<T: AbstractAnalyzer<State>, State: VarState + Lattice + Clon
             analyzer.process_branch(irmap, &new_state, &succ_addrs, &addr)
         {
             let has_change = if statemap.contains_key(&succ_addr) {
+                log::debug!("Processing edge from 0x{:x} to 0x{:x}", addr, succ_addr);
                 let old_state = statemap.get(&succ_addr).unwrap();
+                log::debug!(" -> old state: {:?}", old_state);
+                log::debug!(" -> branch state: {:?}", branch_state);
                 let merged_state = old_state.meet(&branch_state, &LocIdx { addr: addr, idx: 0 });
 
                 if merged_state > *old_state {
