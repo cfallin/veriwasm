@@ -17,6 +17,7 @@ use ir::types::IRMap;
 use loaders::types::{ExecutableType, VwArch, VwMetadata, VwModule};
 use petgraph::graphmap::GraphMap;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use yaxpeax_core::analyses::control_flow::{VW_Block, VW_CFG};
 use yaxpeax_core::memory::repr::process::{ModuleData, ModuleInfo, Segment};
 
@@ -58,7 +59,7 @@ pub enum HeapStrategy {
 
 fn func_body_and_bbs_to_cfg(
     code: &[u8],
-    basic_blocks: &[usize],
+    basic_blocks: &[Range<usize>],
     cfg_edges: &[(usize, usize)],
 ) -> (VW_CFG, IRMap, VwModule) {
     // We build the VW_CFG manually; we skip the CFG-recovery
@@ -67,18 +68,14 @@ fn func_body_and_bbs_to_cfg(
     let mut cfg = VW_CFG {
         // First block is always the entry point. Its offset is likely
         // not 0, because there will likely be a prologue first.
-        entrypoint: basic_blocks[0] as u64,
+        entrypoint: basic_blocks[0].start as u64,
         blocks: BTreeMap::new(),
         graph: GraphMap::new(),
     };
 
     for i in 0..basic_blocks.len() {
-        let start = basic_blocks[i] as u64;
-        let end = if i == basic_blocks.len() - 1 {
-            code.len() as u64
-        } else {
-            basic_blocks[i + 1] as u64
-        };
+        let start = basic_blocks[i].start as u64;
+        let end = basic_blocks[i].end as u64;
         assert!(end > start, "block has zero length: {} -> {}", start, end);
         let end = end - 1; // `end` is inclusive!
         let bb = VW_Block { start, end };
@@ -155,7 +152,7 @@ fn func_body_and_bbs_to_cfg(
 
 pub fn validate_heap(
     code: &[u8],
-    basic_blocks: &[usize],
+    basic_blocks: &[Range<usize>],
     cfg_edges: &[(usize, usize)],
     heap_strategy: HeapStrategy,
 ) -> Result<(), ValidationError> {
