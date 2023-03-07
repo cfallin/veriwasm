@@ -177,7 +177,7 @@ fn get_destinations(instr: &X64Instruction) -> Vec<Value> {
     for (loc, dir) in uses_vec {
         match (loc, dir) {
             (Some(Location::Register(reg)), Direction::Write) => {
-                // println!("destination: {:?} width = {:?}", reg, reg.width());
+                log::debug!("destination: {:?} width = {:?}", reg, reg.width());
                 destinations.push(convert_reg(reg));
             }
             (Some(Location::ZF), Direction::Write) => {
@@ -186,7 +186,7 @@ fn get_destinations(instr: &X64Instruction) -> Vec<Value> {
             (Some(Location::CF), Direction::Write) => {
                 destinations.push(Value::Reg(Cf, Size8));
             }
-            (Some(Location::UnevalMem(op)), Direction::Read) => {
+            (Some(Location::UnevalMem(op)), Direction::Write) => {
                 destinations.push(convert_operand(instr.operand(op), Size32)); // is Size32 right?
             }
             _ => {}
@@ -786,6 +786,7 @@ pub fn lift(instr: &X64Instruction, addr: &Addr, metadata: &VwMetadata, strict: 
                 instrs.extend(generic_clear(instr))
             },
     };
+    log::debug!(" -> lifted to: {:?}", instrs);
     instrs
 }
 
