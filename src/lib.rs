@@ -37,7 +37,7 @@ impl std::error::Error for ValidationError {}
 /// check to be parameterized to work with different VMs -- first
 /// Lucet, eventually Wasmtime, perhaps others -- that have slightly
 /// different VM-context data structure layouts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum HeapStrategy {
     /// The first argument to functions is a hidden argument that is
     /// the heap base. Accesses to the heap are computed relative to
@@ -49,13 +49,48 @@ pub enum HeapStrategy {
     HeapPtrFirstArgWithGuards,
 
     /// The first argument to functions is a hidden VM-context struct
-    /// pointer, and another pointer within this struct points to the
-    /// Wasm heap. The guard region is assumed to be present as
-    /// above. The offset to the heap-base pointer within vmctx is
-    /// configurable.
+    /// pointer, and a series of descriptors of pointers accessible
+    /// from this struct are included.
     ///
     /// This corresponds to Wasmtime's design.
-    VMCtxFirstArgWithGuards { vmctx_heap_base_ptr_offset: usize },
+    VMCtx(Vec<VMCtxField>),
+}
+
+/// A descriptor of one field in the vmctx that refers to memory that
+/// the Wasm guest is allowed to access.
+#[derive(Clone, Debug)]
+pub enum VMCtxField {
+    /// A statically-sized region (e.g., a heap). The base pointer is
+    /// at a given offset in the vmctx struct, and the heap and guard
+    /// region together are a given size. Any access that can be
+    /// statically proven to be within the heap plus guard region is
+    /// allowed.
+    StaticRegion {
+        base_ptr_vmctx_offset: usize,
+        heap_and_guard_size: usize,
+    },
+
+    /// A dynamically-sized region. The base pointer and a separate
+    /// length field, and element size by which that length field is
+    /// interpreted, are given.
+    DynamicRegion {
+        base_ptr_vmctx_offset: usize,
+        len_vmctx_offset: usize,
+        element_size: usize,
+    },
+
+    /// A field that we access directly.
+    Field {
+        offset: usize,
+        len: usize,
+    },
+
+    /// An import: a pointer to one of the above kinds of fields, but
+    /// elsewhere.
+    Import {
+        ptr_vmctx_offset: usize,
+        kind: Box<VMCtxField>,
+    },
 }
 
 fn func_body_and_bbs_to_cfg(
