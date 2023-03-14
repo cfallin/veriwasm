@@ -49,11 +49,12 @@ pub enum HeapStrategy {
     HeapPtrFirstArgWithGuards,
 
     /// The first argument to functions is a hidden VM-context struct
-    /// pointer, and a series of descriptors of pointers accessible
-    /// from this struct are included.
+    /// pointer, with the given size, and a series of descriptors of
+    /// pointers accessible from this struct are included. Direct
+    /// accesses to fields on the struct are always allowed as well.
     ///
     /// This corresponds to Wasmtime's design.
-    VMCtx(Vec<VMCtxField>),
+    VMCtx(usize, Vec<VMCtxField>),
 }
 
 /// A descriptor of one field in the vmctx that refers to memory that
@@ -80,10 +81,7 @@ pub enum VMCtxField {
     },
 
     /// A field that we access directly.
-    Field {
-        offset: usize,
-        len: usize,
-    },
+    Field { offset: usize, len: usize },
 
     /// An import: a pointer to one of the above kinds of fields, but
     /// elsewhere.
