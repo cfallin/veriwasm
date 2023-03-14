@@ -1,10 +1,8 @@
 mod aarch64;
-mod cfg;
 pub mod types;
 //pub mod utils;
 mod x64;
 
-pub use self::cfg::fully_resolved_cfg;
 pub use self::x64::lift_cfg;
 use crate::ir::types::Stmt;
 use crate::loaders::types::VwArch;

@@ -1,8 +1,7 @@
 use crate::{analyses, checkers, ir, loaders};
 use analyses::reaching_defs::analyze_reaching_defs;
 use analyses::reaching_defs::ReachingDefnAnalyzer;
-use analyses::{run_worklist, SwitchAnalyzer};
-use checkers::resolve_jumps;
+use analyses::run_worklist;
 use ir::lift_cfg;
 use ir::types::*;
 use loaders::types::VwModule;

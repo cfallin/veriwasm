@@ -4,7 +4,6 @@ use crate::ir::types::*;
 // use crate::ir::utils::{is_mem_access, is_stack_access};
 use crate::lattices::heaplattice::{HeapLattice, HeapValue};
 use crate::lattices::reachingdefslattice::LocIdx;
-use crate::loaders::utils::is_libcall;
 use std::collections::HashMap;
 
 use HeapValue::*;
@@ -72,7 +71,7 @@ impl Checker<HeapLattice> for HeapChecker<'_> {
 
     fn check_statement(&self, state: &HeapLattice, ir_stmt: &Stmt, loc_idx: &LocIdx) -> bool {
         match ir_stmt {
-            //1. Check that at each call rdi = HeapBase
+            //1. Check that at each call rdi = VMCtx
             Stmt::Call(v) => match state.regs.get_reg(Rdi, Size64).v {
                 Some(HeapBase) => (),
                 _ => {

@@ -1,5 +1,4 @@
 use core::str::FromStr;
-use lucet_module::Signature;
 use std::collections::HashMap;
 use yaxpeax_core::memory::repr::process::{
     ELFExport, ELFImport, ELFSection, ELFSymbol, ModuleData, ModuleInfo,
@@ -57,8 +56,6 @@ pub struct VwMetadata {
 
 #[derive(Clone, Debug)]
 pub struct VwFuncInfo {
-    // Index -> Type
-    pub signatures: Vec<Signature>,
     // Name -> Index
     pub indexes: HashMap<String, u32>,
 }
@@ -66,7 +63,6 @@ pub struct VwFuncInfo {
 impl VwFuncInfo {
     pub fn new() -> Self {
         VwFuncInfo {
-            signatures: Vec::new(),
             indexes: HashMap::new(),
         }
     }

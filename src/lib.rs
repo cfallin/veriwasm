@@ -7,7 +7,6 @@ pub mod checkers;
 pub mod ir;
 pub mod lattices;
 pub mod loaders;
-pub mod runner;
 
 use analyses::run_worklist;
 use analyses::HeapAnalyzer;

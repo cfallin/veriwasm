@@ -5,13 +5,11 @@ use crate::lattices::reachingdefslattice::ReachingDefnLattice;
 use crate::lattices::VariableState;
 use crate::VwModule;
 use crate::{IRMap, VwMetadata, VW_CFG};
-use analyses::locals_analyzer::LocalsAnalyzer;
 use analyses::reaching_defs::{analyze_reaching_defs, ReachingDefnAnalyzer};
 use analyses::{run_worklist, AnalysisResult};
 
-use analyses::{CallAnalyzer, HeapAnalyzer, StackAnalyzer};
-use checkers::locals_checker::check_locals;
-use checkers::{check_calls, check_heap, check_stack};
+use analyses::HeapAnalyzer;
+use checkers::check_heap;
 use ir::fully_resolved_cfg;
 use ir::types::FunType;
 // use ir::utils::has_indirect_calls;
