@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
+use super::LocIdx;
 use crate::ir::types::{ValSize, X86Regs};
-use crate::lattices::reachingdefslattice::LocIdx;
 use crate::lattices::{Lattice, VarSlot};
 
 use X86Regs::*;

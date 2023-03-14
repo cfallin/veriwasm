@@ -1,7 +1,6 @@
 mod heap_analyzer;
-mod reaching_defs;
 use crate::ir::types::*;
-use crate::lattices::reachingdefslattice::LocIdx;
+use crate::lattices::LocIdx;
 use crate::lattices::{Lattice, VarState};
 use std::collections::{HashMap, VecDeque};
 use yaxpeax_core::analyses::control_flow::VW_CFG;

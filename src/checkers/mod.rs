@@ -2,8 +2,8 @@ use crate::{analyses, ir, lattices};
 use analyses::AnalysisResult;
 use ir::types::*;
 use itertools::Itertools;
-use lattices::reachingdefslattice::LocIdx;
 use lattices::Lattice;
+use lattices::LocIdx;
 
 mod heap_checker;
 

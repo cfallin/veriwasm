@@ -4,7 +4,7 @@ use analyses::{AbstractAnalyzer, AnalysisResult};
 use ir::types::*;
 // use ir::utils::{extract_stack_offset, is_stack_access};
 use lattices::heaplattice::{HeapLattice, HeapValue, HeapValueLattice};
-use lattices::reachingdefslattice::LocIdx;
+use lattices::LocIdx;
 use lattices::{ConstLattice, VarState};
 use loaders::types::VwMetadata;
 use std::default::Default;

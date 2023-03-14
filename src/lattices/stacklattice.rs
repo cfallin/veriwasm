@@ -1,4 +1,4 @@
-use crate::lattices::reachingdefslattice::LocIdx;
+use super::LocIdx;
 use crate::lattices::{Lattice, VarSlot};
 use std::cmp::Ordering;
 use std::collections::HashMap;

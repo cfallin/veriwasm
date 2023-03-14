@@ -1,16 +1,20 @@
 pub mod heaplattice;
-pub mod reachingdefslattice;
 pub mod regslattice;
 pub mod stacklattice;
 use crate::{ir, lattices};
 use ir::types::{Binopcode, MemArg, MemArgs, ValSize, Value, X86Regs};
-use lattices::reachingdefslattice::LocIdx;
 use lattices::regslattice::X86RegsLattice;
 use lattices::stacklattice::StackLattice;
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
 use X86Regs::*;
+
+#[derive(PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Debug)]
+pub struct LocIdx {
+    pub addr: u64,
+    pub idx: u32,
+}
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct VarSlot<T> {
