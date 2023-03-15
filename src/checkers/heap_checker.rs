@@ -1,7 +1,6 @@
 use crate::analyses::{AbstractAnalyzer, AnalysisResult, HeapAnalyzer};
 use crate::checkers::Checker;
 use crate::ir::types::*;
-// use crate::ir::utils::{is_mem_access, is_stack_access};
 use crate::lattices::heaplattice::{HeapLattice, HeapValue};
 use crate::lattices::LocIdx;
 use std::collections::HashMap;

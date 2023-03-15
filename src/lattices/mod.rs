@@ -126,6 +126,16 @@ impl<T: Eq + Clone + Debug> ConstLattice<T> {
     pub fn new(v: T) -> Self {
         ConstLattice { v: Some(v) }
     }
+
+    pub fn map<F: Fn(T) -> T>(&self, f: F) -> Self {
+        Self { v: self.v.map(f) }
+    }
+
+    pub fn flat_map<F: Fn(T) -> Option<T>>(&self, f: F) -> Self {
+        Self {
+            v: self.v.and_then(f),
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Default, Clone, Debug)]

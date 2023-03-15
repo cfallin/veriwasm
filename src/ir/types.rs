@@ -259,11 +259,7 @@ impl Value {
                 Mem2Args(memarg1, memarg2) => return memarg1.is_rsp() || memarg2.is_rsp(),
                 Mem3Args(memarg1, memarg2, memarg3) | MemScale(memarg1, memarg2, memarg3) => {
                     return memarg1.is_rsp() || memarg2.is_rsp() || memarg3.is_rsp()
-                } // MemArgs::MemScale(memarg1, memarg2, memarg3) => {
-                  //     return memarg1.is_rsp()
-                  //         || memarg2.is_rsp()
-                  //         || memarg3.is_rsp()
-                  // }
+                }
             }
         }
         false
@@ -277,11 +273,7 @@ impl Value {
                 Mem2Args(memarg1, memarg2) => return memarg1.is_rbp() || memarg2.is_rbp(),
                 Mem3Args(memarg1, memarg2, memarg3) | MemScale(memarg1, memarg2, memarg3) => {
                     return memarg1.is_rbp() || memarg2.is_rbp() || memarg3.is_rbp()
-                } // MemArgs::MemScale(memarg1, memarg2, memarg3) => {
-                  //     return memarg1.is_rbp()
-                  //         || memarg2.is_rbp()
-                  //         || memarg3.is_rbp()
-                  // }
+                }
             }
         }
         false

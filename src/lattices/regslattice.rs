@@ -42,7 +42,7 @@ impl<T: PartialOrd> PartialOrd for X86RegsLattice<T> {
 }
 
 impl<T: Lattice + Clone> X86RegsLattice<T> {
-    pub fn get_reg(&self, index: X86Regs, size: ValSize) -> T {
+    pub fn get_reg(&self, index: X86Regs, _size: ValSize) -> T {
         if let Some(slot) = self.map.get(&index) {
             slot.value.clone()
         } else {

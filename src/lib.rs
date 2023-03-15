@@ -38,21 +38,10 @@ impl std::error::Error for ValidationError {}
 /// different VM-context data structure layouts.
 #[derive(Clone, Debug)]
 pub enum HeapStrategy {
-    /// The first argument to functions is a hidden argument that is
-    /// the heap base. Accesses to the heap are computed relative to
-    /// this base. The virtual-memory layout has sufficient guard
-    /// regions that no bounds-checks are necessary as long as only an
-    /// unsigned 32-bit offset is added to the base.
-    ///
-    /// This corresponds to Lucet's design.
-    HeapPtrFirstArgWithGuards,
-
     /// The first argument to functions is a hidden VM-context struct
     /// pointer, with the given size, and a series of descriptors of
     /// pointers accessible from this struct are included. Direct
     /// accesses to fields on the struct are always allowed as well.
-    ///
-    /// This corresponds to Wasmtime's design.
     VMCtx(usize, Vec<VMCtxField>),
 }
 

@@ -2,7 +2,6 @@ use crate::ir::types::Stmt;
 use crate::{analyses, ir, lattices, loaders};
 use analyses::{AbstractAnalyzer, AnalysisResult};
 use ir::types::*;
-// use ir::utils::{extract_stack_offset, is_stack_access};
 use lattices::heaplattice::{HeapLattice, HeapValue, HeapValueLattice};
 use lattices::LocIdx;
 use lattices::{ConstLattice, VarState};
@@ -22,7 +21,7 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
         let mut result: HeapLattice = Default::default();
         result
             .regs
-            .set_reg(Rdi, Size64, HeapValueLattice::new(HeapBase));
+            .set_reg(Rdi, Size64, HeapValueLattice::new(VMCtx(0)));
         result
     }
 
@@ -32,9 +31,11 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
                 if let &Value::Reg(rd, Size32) | &Value::Reg(rd, Size16) | &Value::Reg(rd, Size8) =
                     dst
                 {
-                    in_state
-                        .regs
-                        .set_reg(rd, Size64, HeapValueLattice::new(Bounded4GB));
+                    in_state.regs.set_reg(
+                        rd,
+                        Size64,
+                        HeapValueLattice::new(StaticBoundedVal(0..(1 << 32))),
+                    );
                 } else {
                     in_state.set_to_bot(dst)
                 }
@@ -45,11 +46,7 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
                 in_state.adjust_stack_offset(opcode, dst, src1, src2)
             }
             Stmt::Call(_) => {
-                // TODO: this should only be for probestack
-                // RDI is conserved on calls
-                // let v = in_state.regs.get_reg(Rdi, Size64);
                 in_state.on_call();
-                // in_state.regs.set_reg(Rdi, Size64, v);
             }
             _ => (),
         }
@@ -70,7 +67,7 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
                 rd,
                 Size64,
                 ConstLattice {
-                    v: Some(Bounded4GB),
+                    v: Some(StaticBoundedVal(1 << 32)),
                 },
             );
             return;
@@ -78,7 +75,7 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
 
         match opcode {
             Unopcode::Mov => {
-                let v = self.aeval_unop(in_state, src);
+                let v = self.aeval_value(in_state, src);
                 in_state.set(dst, v);
             }
             Unopcode::Movsx => {
@@ -137,55 +134,47 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
     }
 }
 
-pub fn is_globalbase_access(in_state: &HeapLattice, memargs: &MemArgs) -> bool {
-    if let MemArgs::Mem2Args(arg1, _arg2) = memargs {
-        if let MemArg::Reg(regnum, size) = arg1 {
-            assert_eq!(size.into_bits(), 64);
-            let base = in_state.regs.get_reg(*regnum, *size);
-            if let Some(HeapBase) = base.v {
-                return true;
-            }
-        }
-    };
-    false
-}
-
 impl HeapAnalyzer {
-    pub fn aeval_unop(&self, in_state: &HeapLattice, value: &Value) -> HeapValueLattice {
+    pub fn aeval_value(&self, in_state: &HeapLattice, value: &Value) -> HeapValueLattice {
         match value {
+            Value::Mem(memsize, memargs) if value.is_stack_access() => {
+                let offset = memargs.extract_stack_offset();
+                in_state.stack.get(offset, memsize.into_bytes())
+            }
+
             Value::Mem(memsize, memargs) => {
-                if is_globalbase_access(in_state, memargs) {
-                    return HeapValueLattice::new(GlobalsBase);
-                }
-                if value.is_stack_access() {
-                    let offset = memargs.extract_stack_offset();
-                    let v = in_state.stack.get(offset, memsize.into_bytes());
-                    return v;
-                }
+                let ea = self.aeval_memargs(in_state, memargs);
+                todo!()
             }
 
             Value::Reg(regnum, size) => {
+                let val = in_state.regs.get_reg(*regnum, Size64);
                 if size.into_bits() <= 32 {
-                    return HeapValueLattice::new(Bounded4GB);
+                    val.map(|x| x.clamp32())
                 } else {
-                    return in_state.regs.get_reg(*regnum, Size64);
+                    val
                 }
             }
 
-            Value::Imm(_, _, immval) => {
-                if (*immval as u64) == self.metadata.guest_table_0 {
-                    return HeapValueLattice::new(GuestTable0);
-                } else if (*immval as u64) == self.metadata.lucet_tables {
-                    return HeapValueLattice::new(LucetTables);
-                } else if (*immval >= 0) && (*immval < (1 << 32)) {
-                    return HeapValueLattice::new(Bounded4GB);
-                }
+            Value::Imm(_, _, immval) if immval != -1 => {
+                HeapValueLattice::new(HeapValue::StaticBoundedVal((*immval as u64) + 1))
             }
 
-            Value::RIPConst => {
-                return HeapValueLattice::new(RIPConst);
-            }
+            Value::RIPConst => HeapValueLattice::new(RIPConst),
+
+            _ => HeapValueLattice::default(),
         }
-        Default::default()
+    }
+
+    /// Evaluates to the effective address.
+    pub fn aeval_memargs(&self, in_state: &HeapLattice, memargs: &MemArgs) -> HeapValueLattice {
+        todo!()
+    }
+
+    pub fn aeval_memarg(&self, in_state: &HeapLattice, memarg: &MemArg) -> HeapValueLattice {
+        match memarg {
+            MemArg::Reg(reg, size) => in_state.regs.get_reg(reg, size),
+            MemArg::Imm(ImmType::Signed, ValSize::Size32, imm) => {}
+        }
     }
 }
