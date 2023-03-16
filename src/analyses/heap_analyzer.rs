@@ -168,13 +168,25 @@ impl HeapAnalyzer {
 
     /// Evaluates to the effective address.
     pub fn aeval_memargs(&self, in_state: &HeapLattice, memargs: &MemArgs) -> HeapValueLattice {
-        todo!()
+        match self {
+            MemArgs::Mem1Arg(arg1) => {}
+            MemArgs::Mem2Args(arg1, arg2) => {}
+            MemArgs::Mem3Args(arg1, arg2, arg3) => {}
+            MemArgs::MemScale(arg1, arg2, scale) => {}
+            // TODO: how is x86 [rax + 8*rbx + offset] handled?
+        }
     }
 
     pub fn aeval_memarg(&self, in_state: &HeapLattice, memarg: &MemArg) -> HeapValueLattice {
         match memarg {
             MemArg::Reg(reg, size) => in_state.regs.get_reg(reg, size),
-            MemArg::Imm(ImmType::Signed, ValSize::Size32, imm) => {}
+            MemArg::Imm(ImmType::Signed, ValSize::Size32, imm) => HeapValueLattice::new(
+                HeapValue::StaticBoundedVal((i32::MIN as i64)..((i32::MAX as i64) + 1)),
+            ),
+            MemArg::Imm(ImmType::Unsigned, ValSize::Size32, imm) => {
+                HeapValueLattice::new(HeapValue::StaticBoundedVal(0..((u32::MAX as i64) + 1)))
+            }
+            MemArg::Imm(_, ValSize::Size64, imm) => HeapValueLattice::default(),
         }
     }
 }

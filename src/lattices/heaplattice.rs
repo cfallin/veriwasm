@@ -4,25 +4,28 @@ use std::ops::Range;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HeapValue {
     /// The vmctx pointer, plus some fixed offset.
-    VMCtx(u64),
+    VMCtx(i64),
     /// A value loaded out of `vmctx` at the given offset, plus some
     /// fixed offset. (In other words, `*(vmctx + self.0) + self.1`.)
-    VMCtxField(u64, u64),
-    /// A bound, with a tag.
-    Bound(Tag),
+    VMCtxField(i64, i64),
+    /// A bound, with a tag, in units specified by the static
+    /// multiplier.
+    Bound(Tag, usize),
     /// A value within a known static range. Value given is exclusive
     /// (actual value must be strictly less).
-    StaticBoundedVal(Range<u64>),
+    StaticBoundedVal(Range<i64>),
     /// A value in range 0..(bound[tag] - off).
-    DynamicBoundedVal(Tag, u64),
+    DynamicBoundedVal(Tag, i64),
     /// A pointer to a memory area that is legal to access with offset
     /// in the given range.
-    StaticBoundedMem(Range<u64>),
+    StaticBoundedMem(Range<i64>),
     /// A pointer to a memory area that is legal to access up to a
     /// dynamically-determined bound, minus the given offset. (I.e.,
     /// if the pointer is incremented, this offset increments as well,
     /// to subtract from the allowed bound.)
-    DynamicBoundedMem(Tag, u64),
+    DynamicBoundedMem(Tag, i64),
+    /// A known, constant value.
+    Const(i64),
     /// A pointer to a RIP-relative constant value.
     RIPConst,
 }
@@ -37,49 +40,119 @@ pub type HeapValueLattice = ConstLattice<HeapValue>;
 pub type HeapLattice = VariableState<HeapValueLattice>;
 
 impl HeapValue {
-    pub fn add_offset(self, off: u64) -> Option<Self> {
-        match self {
-            Self::VMCtx(orig_off) => Some(Self::VMCtx(orig_off.wrapping_add(off))),
-            Self::VMCtxField(field_off, orig_off) => {
-                Some(Self::VMCtxField(field_off, orig_off.wrapping_add(off)))
-            }
-            Self::Bound(tag) => None,
-            Self::StaticBoundedVal(bound) if bound >= off => {
-                Some(Self::StaticBoundedVal(bound - off))
-            }
-            Self::StaticBoundedVal(_) => None,
-            Self::DynamicBoundedVal(tag, tag_adj) => {
-                Some(Self::DynamicBoundedVal(tag, tag_adj.wrapping_add(off)))
-            }
-            Self::StaticBoundedMem(bound) if bound >= off => {
-                Some(Self::StaticBoundedMem(bound - off))
-            }
-            Self::StaticBoundedMem(_) => None,
-            Self::DynamicBoundedMem(tag, tag_adj) => {
-                Some(Self::DynamicBoundedMem(tag, tag_adj.wrapping_add(off)))
-            }
-            Self::RIPConst => None,
-        }
+    pub fn imm(self, value: i64) -> Self {
+        Self::Const(value)
+    }
+
+    pub fn add_offset(self, off: i64) -> Option<Self> {
+        self.add(Self::Constant(off))
     }
 
     pub fn clamp32(self) -> Self {
         match self {
-            Self::StaticBoundedVal(bound) if bound <= (u32::MAX as u64) => {
-                Self::StaticBoundedVal(bound)
+            Self::StaticBoundedVal(bound)
+                if (bound.start as u32) == bound.start && (bound.end as u32) == bound.end =>
+            {
+                self
             }
-            _ => Self::StaticBoundedVal((u32::MAX as u64) + 1),
+            Self::Const(val) => Self::Const(val & (u32::MAX as i64)),
+            _ => Self::StaticBoundedVal(0..(u32::MAX as u64) + 1),
         }
     }
 
-    pub fn ea_2reg(a: Self, b: Self, off: u64) -> Self {
-        unimplemented!()
+    pub fn add(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::VMCtx(orig_off), Self::Const(off)) => {
+                Some(Self::VMCtx(orig_off.wrapping_add(off)))
+            }
+            (Self::VMCtxField(field_off, orig_off), Self::Const(off)) => {
+                Some(Self::VMCtxField(field_off, orig_off.wrapping_add(off)))
+            }
+            (Self::Bound(tag), Self::Const(off)) => None,
+            (Self::StaticBoundedVal(range), Self::Const(off)) => Some(Self::StaticBoundedVal(
+                range.start.checked_add(off)?..range.end.checked_add(off)?,
+            )),
+            (Self::DynamicBoundedVal(tag, tag_adj), Self::Const(off)) => {
+                Some(Self::DynamicBoundedVal(tag, tag_adj.wrapping_add(off)))
+            }
+            (Self::StaticBoundedMem(range), Self::Const(off)) => Some(Self::StaticBoundedMem(
+                range.start.checked_sub(off)?..range.end.checked_sub(off)?,
+            )),
+            (Self::DynamicBoundedMem(tag, tag_adj), Self::Const(off)) => {
+                Some(Self::DynamicBoundedMem(tag, tag_adj.wrapping_add(off)))
+            }
+
+            (Self::StaticBoundedVal(range), Self::StaticBoundedVal(other_range)) => {
+                let start = range.start.checked_add(other_range.start)?;
+                let end = range.end.checked_add(other_range.end)?;
+                Some(Self::StaticBoundedVal(start..end))
+            }
+            (Self::StaticBoundedMem(range), Self::StaticBoundedVal(other_range))
+            | (Self::StaticBoundedVal(other_range), Self::StaticBoundedMem(range)) => {
+                let start = range.start.checked_sub(other_range.end)?;
+                let end = range.end.checked_sub(other_range.start)?;
+                Some(Self::StaticBoundedMem(start..end))
+            }
+
+            (Self::DynamicBoundedMem(tag, off), Self::StaticBoundedVal(range))
+            | (Self::StaticBoundedVal(range), Self::DynamicBoundedMem(tag, off)) => {
+                let new_off = off.checked_sub(range.end)?;
+                Self::DynamicBoundedMem(tag, new_off)
+            }
+
+            (Self::Const(val), Self::Const(off)) => Some(Self::Const(val.wrapping_add(off))),
+            (other, Self::Const(_)) => other.add(self),
+
+            (Self::RIPConst, _) => None,
+            (_, Self::RIPConst) => None,
+        }
     }
 
-    pub fn ea_3reg(a: Self, b: Self, c: Self, scale: u8, off: u64) -> Self {
-        unimplemented!()
+    pub fn shl(self, shift: usize) -> Option<Self> {
+        todo!()
     }
 
-    pub fn load(self) -> Self {
-        unimplemented!()
+    pub fn load(self, vmctx_fields: &[VMCtxField]) -> Option<Self> {
+        match self {
+            Self::VMCtx(off) => {
+                for (field_idx, field) in vmctx_fields.iter().enumerate() {
+                    if let Some(value) = Self::load_vmctx_at_offset(field_idx, field, off as usize)
+                    {
+                        return Some(value);
+                    }
+                }
+                Some(Self::VMCtxField(off, 0))
+            }
+            Self::VMCtxField(field_off, off) => {
+                
+            }
+        }
+    }
+
+    fn load_vmctx_at_offset(field_idx: usize, field: &VMCtxField, offset: usize) -> Option<Self> {
+        match field {
+            &VMCtxField::StaticRegion {
+                base_ptr_vmctx_offset,
+                heap_and_guard_size,
+            } if base_ptr_vmctx_offset == (off as usize) => {
+                Some(Self::StaticBoundedMem(0..(heap_and_guard_size as i64)))
+            }
+            &VMCtxField::DynamicRegion {
+                base_ptr_vmctx_offset,
+                ..
+            } if base_ptr_vmctx_offset == (off as usize) => {
+                let tag = Tag(field_idx);
+                Some(Self::DynamicBoundedMem(tag, 0))
+            }
+            &VMCtxField::DynamicRegion {
+                len_vmctx_offset,
+                element_size,
+                ..
+            } if len_vmctx_offset == (off as usize) => {
+                let tag = Tag(field_idx);
+                Some(Self::Bound(tag, element_size))
+            }
+            _ => None,
+        }
     }
 }
