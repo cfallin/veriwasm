@@ -3,31 +3,22 @@ use std::ops::Range;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HeapValue {
-    /// The vmctx pointer, plus some fixed offset.
-    VMCtx(i64),
-    /// A value loaded out of `vmctx` at the given offset, plus some
-    /// fixed offset. (In other words, `*(vmctx + self.0) + self.1`.)
-    VMCtxField(i64, i64),
-    /// A bound, with a tag, in units specified by the static
-    /// multiplier.
-    Bound(Tag, usize),
-    /// A value within a known static range. Value given is exclusive
-    /// (actual value must be strictly less).
-    StaticBoundedVal(Range<i64>),
-    /// A value in range 0..(bound[tag] - off).
-    DynamicBoundedVal(Tag, i64),
-    /// A pointer to a memory area that is legal to access with offset
-    /// in the given range.
-    StaticBoundedMem(Range<i64>),
-    /// A pointer to a memory area that is legal to access up to a
-    /// dynamically-determined bound, minus the given offset. (I.e.,
-    /// if the pointer is incremented, this offset increments as well,
-    /// to subtract from the allowed bound.)
-    DynamicBoundedMem(Tag, i64),
-    /// A known, constant value.
+    /// The vmctx pointer.
+    VMCtx,
+    /// A value loaded from a given location.
+    Load(Box<HeapValue>),
+    /// An offset from a given location.
+    Add(Box<HeapValue>, Box<HeapValue>),
+    /// A multiplication (scaling) operation.
+    Scale(Box<HeapValue>, u8),
+    /// A single known constant value.
     Const(i64),
-    /// A pointer to a RIP-relative constant value.
-    RIPConst,
+    /// A range of possible values. Inclusive of start and end: thus,
+    /// cannot represent an empty range, but can represent "all 64-bit
+    /// values".
+    Range(Box<HeapValue>, Box<HeapValue>),
+    /// A pointer to somewhere in the .text segment.
+    TextPointer,
 }
 
 /// A tag for a bound value. Corresponds to the field-spec index in
@@ -40,134 +31,159 @@ pub type HeapValueLattice = ConstLattice<HeapValue>;
 pub type HeapLattice = VariableState<HeapValueLattice>;
 
 impl HeapValue {
-    pub fn imm(self, value: i64) -> Self {
+    pub fn imm(value: i64) -> Self {
         Self::Const(value)
     }
 
-    pub fn add_offset(self, off: i64) -> Option<Self> {
-        self.add(Self::Constant(off))
+    /// Validate that expression is in "normal form":
+    ///
+    /// ```plain
+    /// - Atom := VMCtx | Load(_) | Const(_) | TextPointer
+    /// - AtomSummand := Scale(Atom, _) | Atom
+    /// - AtomSum := Add(AtomSum, AtomSum) | AtomSummand
+    /// - Range := Range(AtomSum, AtomSum) -- half-open (`[begin, end)`) range.
+    ///
+    /// - Normalized := Range | AtomSum
+    /// ```
+    pub fn is_normalized(&self) -> bool {
+        match self {
+            Self::Range(a, b) => a.is_atom_sum() && b.is_atom_sum(),
+            x => x.is_atom_sum(),
+        }
     }
 
-    pub fn clamp32(self) -> Self {
+    fn is_atom_sum(&self) -> bool {
         match self {
-            Self::StaticBoundedVal(bound)
-                if (bound.start as u32) == bound.start && (bound.end as u32) == bound.end =>
-            {
-                self
-            }
-            Self::Const(val) => Self::Const(val & (u32::MAX as i64)),
-            _ => Self::StaticBoundedVal(0..(u32::MAX as u64) + 1),
+            Self::Add(a, b) => a.is_atom_sum() && b.is_atom_sum(),
+            x => x.is_atom_summand(),
         }
+    }
+
+    fn is_atom_summand(&self) -> bool {
+        match self {
+            Self::Scale(a, _) => a.is_atom(),
+            x => x.is_atom(),
+        }
+    }
+
+    fn is_atom(&self) -> bool {
+        match self {
+            Self::VMCtx | Self::Load(_) | Self::Const(_) | Self::TextPointer => true,
+            _ => false,
+        }
+    }
+
+    /// Simplify an expression to normal form.
+    ///
+    /// - Add distributes over Range:
+    ///   - `simplify(Add(Range(a, b), c))` ->
+    ///     `Range(simplify(Add(a, c)), simplify(Add(b, c)))`
+    /// - Scale distributes over Range:
+    ///   - `simplify(Scale(Range(a, b), k))` ->
+    ///     `Range(simplify(Scale(a, k)), simplify(Scale(b, k)))`
+    /// - Scale distributes over Add:
+    ///   - `simplify(Scale(Add(a, b), k))` ->
+    ///     `Add(simplify(Scale(a, k)), simplify(Scale(b, k)))`
+    /// - `Add` and `Scale` can do constant folding with `Const`.
+    /// - `Load` simplifies its inner expression as well.
+    /// - Range can be flattened:
+    ///   - `Range(Range(a, b), c)` -> `Range(a, c)`
+    ///   - `Range(a, Range(b, c))` -> `Range(a, c)`
+    ///   - `Range(Range(a, b), Range(c, d))` -> `Range(a, d)`
+    /// - To avoid indefinite growth, `Load` truncates its expression
+    ///   after two nested `Load`s.
+    pub fn simplify(self) -> Self {
+        match self {
+            Self::Range(a, b) => {
+                let a = a.simplify();
+                let b = b.simplify();
+                match (a, b) {
+                    (Self::Range(a, _), Self::Range(_, b)) => Self::Range(a, b),
+                    (a, Self::Range(_, b)) => Self::Range(Box::new(a), b),
+                    (Self::Range(a, _), b) => Self::Range(a, Box::new(b)),
+                    (a, b) => Self::Range(Box::new(a), Box::new(b)),
+                }
+            }
+            Self::Add(a, b) => {
+                let a = a.simplify();
+                let b = b.simplify();
+                match (a, b) {
+                    // Adds distribute over Ranges if values do not
+                    // wrap; if they do, or if we don't know, then the
+                    // range must go to "all 64-bit values" because
+                    // both i64::MIN and i64::MAX are included.
+                    (Self::Range(a, b), Self::Range(c, d)) => Self::Range(
+                        Box::new(Self::Add(a, c).simplify()),
+                        Box::new(Self::Add(b, d).simplify()),
+                    ),
+                    (a, Self::Range(b, c)) => Self::Range(
+                        Box::new(Self::Add(Box::new(a), b).simplify()),
+                        Box::new(Self::Add(Box::new(a), c).simplify()),
+                    ),
+                    (Self::Range(a, b), c) => Self::Range(
+                        Box::new(Self::Add(a, Box::new(c)).simplify()),
+                        Box::new(Self::Add(b, Box::new(c)).simplify()),
+                    ),
+                    // Adds can const-prop. Wrapping is not a concern
+                    // if we know the exact value.
+                    (Self::Const(a), Self::Const(b)) => Self::Const(a.wrapping_add(b)),
+                    (a, b) => Self::Add(Box::new(a), Box::new(b)),
+                }
+            }
+            Self::Scale(a, k) => {
+                let a = a.simplify();
+                match a {
+                    // Scales distribute over Ranges. TODO: wrapping?
+                    Self::Range(a, b) => Self::Range(
+                        Box::new(Self::Scale(a, k).simplify()),
+                        Box::new(Self::Scale(b, k).simplify()),
+                    ),
+                    // Scales distribute over Adds (linearity!).
+                    Self::Add(a, b) => Self::Add(
+                        Box::new(Self::Scale(a, k).simplify()),
+                        Box::new(Self::Scale(b, k).simplify()),
+                    ),
+                    // Scales can const-prop. Wrapping is not a
+                    // concern if we know the exact value.
+                    Self::Const(a) => Self::Const(a.wrapping_mul(k as i64)),
+                }
+            }
+            Self::Load(addr) => Self::Load(Box::new(addr.simplify())),
+            x => x,
+        }
+    }
+
+    pub fn any64() -> Self {
+        Self::Range(
+            Box::new(Self::Const(i64::MIN)),
+            Box::new(Self::Const(i64::MAX)),
+        )
+    }
+
+    pub fn any32() -> Self {
+        Self::Range(
+            Box::new(Self::Const(0)),
+            Box::new(Self::Const(u32::MAX as i64)),
+        )
+    }
+
+    pub fn add_offset(&self, off: i64) -> Self {
+        Self::Add(Box::new(self.clone()), Box::new(Self::Const(off))).simplify()
     }
 
     pub fn add(self, other: Self) -> Option<Self> {
-        match (self, other) {
-            (Self::VMCtx(orig_off), Self::Const(off)) => {
-                Some(Self::VMCtx(orig_off.wrapping_add(off)))
-            }
-            (Self::VMCtxField(field_off, orig_off), Self::Const(off)) => {
-                Some(Self::VMCtxField(field_off, orig_off.wrapping_add(off)))
-            }
-            (Self::Bound(tag), Self::Const(off)) => None,
-            (Self::StaticBoundedVal(range), Self::Const(off)) => Some(Self::StaticBoundedVal(
-                range.start.checked_add(off)?..range.end.checked_add(off)?,
-            )),
-            (Self::DynamicBoundedVal(tag, tag_adj), Self::Const(off)) => {
-                Some(Self::DynamicBoundedVal(tag, tag_adj.wrapping_add(off)))
-            }
-            (Self::StaticBoundedMem(range), Self::Const(off)) => Some(Self::StaticBoundedMem(
-                range.start.checked_sub(off)?..range.end.checked_sub(off)?,
-            )),
-            (Self::DynamicBoundedMem(tag, tag_adj), Self::Const(off)) => {
-                Some(Self::DynamicBoundedMem(tag, tag_adj.wrapping_add(off)))
-            }
-
-            (Self::StaticBoundedVal(range), Self::StaticBoundedVal(other_range)) => {
-                let start = range.start.checked_add(other_range.start)?;
-                let end = range.end.checked_add(other_range.end)?;
-                Some(Self::StaticBoundedVal(start..end))
-            }
-            (Self::StaticBoundedMem(range), Self::StaticBoundedVal(other_range))
-            | (Self::StaticBoundedVal(other_range), Self::StaticBoundedMem(range)) => {
-                let start = range.start.checked_sub(other_range.end)?;
-                let end = range.end.checked_sub(other_range.start)?;
-                Some(Self::StaticBoundedMem(start..end))
-            }
-
-            (Self::DynamicBoundedMem(tag, off), Self::StaticBoundedVal(range))
-            | (Self::StaticBoundedVal(range), Self::DynamicBoundedMem(tag, off)) => {
-                let new_off = off.checked_sub(range.end)?;
-                Self::DynamicBoundedMem(tag, new_off)
-            }
-
-            (Self::Const(val), Self::Const(off)) => Some(Self::Const(val.wrapping_add(off))),
-            (other, Self::Const(_)) => other.add(self),
-
-            (Self::RIPConst, _) => None,
-            (_, Self::RIPConst) => None,
-        }
-    }
-
-    pub fn shl(self, shift: usize) -> Option<Self> {
         todo!()
     }
 
-    pub fn load(self, vmctx_fields: &[VMCtxField]) -> Option<Self> {
-        match self {
-            Self::VMCtx(off) => {
-                for (field_idx, field) in vmctx_fields.iter().enumerate() {
-                    if let Some(value) = Self::load_vmctx_at_offset(field_idx, field, off as usize)
-                    {
-                        return Some(value);
-                    }
-                }
-                Some(Self::VMCtxField(off, 0))
-            }
-            Self::VMCtxField(field_off, off) => {
-                for (field_idx, field) in vmctx_fields.iter().enumerate() {
-                    if let &VMCtxField::Import {
-                        ptr_vmctx_offset,
-                        ref kind,
-                    } = field
-                    {
-                        if ptr_vmctx_offset == (field_off as usize) {
-                            if let Some(value) =
-                                Self::load_vmctx_at_offset(field_idx, &*kind, off as usize)
-                            {
-                                return Some(value);
-                            }
-                        }
-                    }
-                }
-            }
-            _ => None,
-        }
+    pub fn shl(self, shift: u8) -> Option<Self> {
+        todo!()
     }
 
-    fn load_vmctx_at_offset(field_idx: usize, field: &VMCtxField, offset: usize) -> Option<Self> {
-        match field {
-            &VMCtxField::StaticRegion {
-                base_ptr_vmctx_offset,
-                heap_and_guard_size,
-            } if base_ptr_vmctx_offset == (off as usize) => {
-                Some(Self::StaticBoundedMem(0..(heap_and_guard_size as i64)))
-            }
-            &VMCtxField::DynamicRegion {
-                base_ptr_vmctx_offset,
-                ..
-            } if base_ptr_vmctx_offset == (off as usize) => {
-                let tag = Tag(field_idx);
-                Some(Self::DynamicBoundedMem(tag, 0))
-            }
-            &VMCtxField::DynamicRegion {
-                len_vmctx_offset,
-                element_size,
-                ..
-            } if len_vmctx_offset == (off as usize) => {
-                let tag = Tag(field_idx);
-                Some(Self::Bound(tag, element_size))
-            }
-            _ => None,
-        }
+    pub fn load(self) -> Option<Self> {
+        todo!()
+    }
+
+    pub fn clamp32(self) -> Self {
+        todo!()
     }
 }
