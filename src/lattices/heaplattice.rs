@@ -124,8 +124,23 @@ impl HeapValue {
                 Some(Self::VMCtxField(off, 0))
             }
             Self::VMCtxField(field_off, off) => {
-                
+                for (field_idx, field) in vmctx_fields.iter().enumerate() {
+                    if let &VMCtxField::Import {
+                        ptr_vmctx_offset,
+                        ref kind,
+                    } = field
+                    {
+                        if ptr_vmctx_offset == (field_off as usize) {
+                            if let Some(value) =
+                                Self::load_vmctx_at_offset(field_idx, &*kind, off as usize)
+                            {
+                                return Some(value);
+                            }
+                        }
+                    }
+                }
             }
+            _ => None,
         }
     }
 
