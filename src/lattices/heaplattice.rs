@@ -13,12 +13,10 @@ pub enum HeapValue {
     Scale(Box<HeapValue>, u8),
     /// A single known constant value.
     Const(i64),
-    /// A range of possible values. Inclusive of start and end: thus,
-    /// cannot represent an empty range, but can represent "all 64-bit
-    /// values".
-    Range(Box<HeapValue>, Box<HeapValue>),
     /// A pointer to somewhere in the .text segment.
     TextPointer,
+    /// A min (clamping) operation.
+    Min(Box<HeapValue>, Box<HeapValue>),
 }
 
 /// A tag for a bound value. Corresponds to the field-spec index in
@@ -41,13 +39,13 @@ impl HeapValue {
     /// - Atom := VMCtx | Load(_) | Const(_) | TextPointer
     /// - AtomSummand := Scale(Atom, _) | Atom
     /// - AtomSum := Add(AtomSum, AtomSum) | AtomSummand
-    /// - Range := Range(AtomSum, AtomSum) -- half-open (`[begin, end)`) range.
+    /// - Min := Min(AtomSum, AtomSum)
     ///
-    /// - Normalized := Range | AtomSum
+    /// - Normalized := Min | AtomSum
     /// ```
     pub fn is_normalized(&self) -> bool {
         match self {
-            Self::Range(a, b) => a.is_atom_sum() && b.is_atom_sum(),
+            Self::Min(a, b) => a.is_atom_sum() && b.is_atom_sum(),
             x => x.is_atom_sum(),
         }
     }
