@@ -15,8 +15,8 @@ pub enum HeapValue {
     Const(i64),
     /// A pointer to somewhere in the .text segment.
     TextPointer,
-    /// A min (clamping) operation.
-    Min(Box<HeapValue>, Box<HeapValue>),
+    /// An unsigned min (clamping) operation.
+    UMin(Box<HeapValue>, Box<HeapValue>),
 }
 
 /// A tag for a bound value. Corresponds to the field-spec index in
@@ -39,13 +39,13 @@ impl HeapValue {
     /// - Atom := VMCtx | Load(_) | Const(_) | TextPointer
     /// - AtomSummand := Scale(Atom, _) | Atom
     /// - AtomSum := Add(AtomSum, AtomSum) | AtomSummand
-    /// - Min := Min(AtomSum, AtomSum)
+    /// - Min := UMin(AtomSum, AtomSum)
     ///
     /// - Normalized := Min | AtomSum
     /// ```
     pub fn is_normalized(&self) -> bool {
         match self {
-            Self::Min(a, b) => a.is_atom_sum() && b.is_atom_sum(),
+            Self::UMin(a, b) => a.is_atom_sum() && b.is_atom_sum(),
             x => x.is_atom_sum(),
         }
     }
@@ -73,77 +73,105 @@ impl HeapValue {
 
     /// Simplify an expression to normal form.
     ///
-    /// - Add distributes over Range:
-    ///   - `simplify(Add(Range(a, b), c))` ->
-    ///     `Range(simplify(Add(a, c)), simplify(Add(b, c)))`
-    /// - Scale distributes over Range:
-    ///   - `simplify(Scale(Range(a, b), k))` ->
-    ///     `Range(simplify(Scale(a, k)), simplify(Scale(b, k)))`
+    /// - Add distributes over UMin if no wrapping (TODO: handle wrapping somehow)
+    ///   - `simplify(Add(UMin(a, b), c))` ->
+    ///     `UMin(simplify(Add(a, c)), simplify(Add(b, c)))`
+    /// - Scale distributes over UMin:
+    ///   - `simplify(Scale(UMin(a, b), k))` ->
+    ///     `UMin(simplify(Scale(a, k)), simplify(Scale(b, k)))`
     /// - Scale distributes over Add:
     ///   - `simplify(Scale(Add(a, b), k))` ->
     ///     `Add(simplify(Scale(a, k)), simplify(Scale(b, k)))`
     /// - `Add` and `Scale` can do constant folding with `Const`.
+    ///   - also, push constants to the right otherwise, and
+    ///     reassociate constants outward.
+    ///   - `Add(Const(a), Const(b))` -> `Const(a + b)`
+    ///   - `Add(Const(a), b)` -> `Add(b, Const(a))`
+    ///   - `Add(Add(a, Const(b)), Const(c))` -> `Add(a, Const(b + c))`
+    ///   - `Add(Add(a, Const(b)), c)` -> `Add(Add(a, c), Const(b))`
+    ///   - `Scale(Const(a), k)` -> `Const(a * k)`
     /// - `Load` simplifies its inner expression as well.
-    /// - Range can be flattened:
-    ///   - `Range(Range(a, b), c)` -> `Range(a, c)`
-    ///   - `Range(a, Range(b, c))` -> `Range(a, c)`
-    ///   - `Range(Range(a, b), Range(c, d))` -> `Range(a, d)`
+    /// - UMin can do some constant-folding as well, and reassociates
+    ///   just as `Add` does:
+    ///   - `UMin(Const(a), Const(b))` -> `Const(min(a, b))`
+    ///   - `UMin(Const(a), b)` -> `UMin(b, Const(a))`
+    ///   - `UMin(UMin(a, Const(b)), Const(c))` -> `UMin(a, Const(min(b, c)))`
+    ///   - `UMin(UMin(a, Const(b)), c)` -> `UMin(UMin(a, c), Const(b))`
     /// - To avoid indefinite growth, `Load` truncates its expression
     ///   after two nested `Load`s.
     pub fn simplify(self) -> Self {
+        fn umin(a: i64, b: i64) -> i64 {
+            std::cmp::min(a as u64, b as u64) as i64
+        }
+
         match self {
-            Self::Range(a, b) => {
+            Self::UMin(a, b) => {
                 let a = a.simplify();
                 let b = b.simplify();
                 match (a, b) {
-                    (Self::Range(a, _), Self::Range(_, b)) => Self::Range(a, b),
-                    (a, Self::Range(_, b)) => Self::Range(Box::new(a), b),
-                    (Self::Range(a, _), b) => Self::Range(a, Box::new(b)),
-                    (a, b) => Self::Range(Box::new(a), Box::new(b)),
+                    // `UMin(Const(a), Const(b))` -> `Const(min(a, b))`
+                    (Self::Const(a), Self::Const(b)) => Self::Const(umin(a, b)),
+                    // `UMin(Const(a), b)` -> `UMin(b, Const(a))`
+                    (Self::Const(a), b) => {
+                        Self::UMin(Box::new(b), Box::new(Self::Const(a))).simplify()
+                    }
+                    (Self::UMin(a, b), c) => {
+                        let a = a.simplify();
+                        let b = b.simplify();
+                        match (b, c) {
+                            // `UMin(UMin(a, Const(b)), Const(c))` -> `UMin(a, Const(min(b, c)))`
+                            (Self::Const(b), Self::Const(c)) => {
+                                Self::UMin(Box::new(a), Box::new(Self::Const(umin(b, c))))
+                            }
+                            // `UMin(UMin(a, Const(b)), c)` -> `UMin(UMin(a, c), Const(b))`
+                            (Self::Const(b), c) => Self::UMin(
+                                Box::new(Self::UMin(Box::new(a), Box::new(c))),
+                                Box::new(Self::Const(b)),
+                            ),
+                            // `UMin(UMin(a, b), c)` -> `UMin(UMin(a, b), c)`
+                            (b, c) => Self::UMin(
+                                Box::new(Self::UMin(Box::new(a), Box::new(b))),
+                                Box::new(c),
+                            ),
+                        }
+                    }
+                    // `UMin(a, b)` -> `UMin(a, b)`
+                    (a, b) => Self::UMin(Box::new(a), Box::new(b)),
                 }
             }
             Self::Add(a, b) => {
                 let a = a.simplify();
                 let b = b.simplify();
                 match (a, b) {
-                    // Adds distribute over Ranges if values do not
-                    // wrap; if they do, or if we don't know, then the
-                    // range must go to "all 64-bit values" because
-                    // both i64::MIN and i64::MAX are included.
-                    (Self::Range(a, b), Self::Range(c, d)) => Self::Range(
-                        Box::new(Self::Add(a, c).simplify()),
-                        Box::new(Self::Add(b, d).simplify()),
-                    ),
-                    (a, Self::Range(b, c)) => Self::Range(
-                        Box::new(Self::Add(Box::new(a), b).simplify()),
-                        Box::new(Self::Add(Box::new(a), c).simplify()),
-                    ),
-                    (Self::Range(a, b), c) => Self::Range(
-                        Box::new(Self::Add(a, Box::new(c)).simplify()),
-                        Box::new(Self::Add(b, Box::new(c)).simplify()),
-                    ),
-                    // Adds can const-prop. Wrapping is not a concern
-                    // if we know the exact value.
+                    // `Add(Const(a), Const(b))` -> `Const(a + b)`
                     (Self::Const(a), Self::Const(b)) => Self::Const(a.wrapping_add(b)),
+                    // `Add(Const(a), b)` -> `Add(b, Const(a))`
+                    (Self::Const(a), b) => Self::Add(Box::new(b), Box::new(Self::Const(a))),
+
+                    // `Add(a, b)` -> `Add(a, b)`
                     (a, b) => Self::Add(Box::new(a), Box::new(b)),
                 }
             }
             Self::Scale(a, k) => {
                 let a = a.simplify();
                 match a {
-                    // Scales distribute over Ranges. TODO: wrapping?
-                    Self::Range(a, b) => Self::Range(
+                    // TODO: have to handle wrapping -- consider:
+                    // Scale(UMin(0x3fff_ffff_ffff_ffff, 0x8000_0000_0000_0000), 2) ->
+                    // Scale(0x3fff_ffff_ffff_ffff, 2) -> 0x7fff_ffff_ffff_fffe
+                    // UMin(0x7fff_ffff_ffff_fffe, 0) -> 0
+                    // `Scale(UMin(a, b), k)` -> `UMin(Scale(a, k), Scale(b, k))`
+                    Self::UMin(a, b) => Self::UMin(
                         Box::new(Self::Scale(a, k).simplify()),
                         Box::new(Self::Scale(b, k).simplify()),
                     ),
-                    // Scales distribute over Adds (linearity!).
+                    // `Scale(Add(a, b), k)` -> `Add(Scale(a, k), Scale(b, k))`
                     Self::Add(a, b) => Self::Add(
                         Box::new(Self::Scale(a, k).simplify()),
                         Box::new(Self::Scale(b, k).simplify()),
                     ),
-                    // Scales can const-prop. Wrapping is not a
-                    // concern if we know the exact value.
+                    // `Scale(Const(a), k)` -> `Const(a * k)`
                     Self::Const(a) => Self::Const(a.wrapping_mul(k as i64)),
+                    a => Self::Scale(Box::new(a), k),
                 }
             }
             Self::Load(addr) => Self::Load(Box::new(addr.simplify())),
@@ -151,26 +179,12 @@ impl HeapValue {
         }
     }
 
-    pub fn any64() -> Self {
-        Self::Range(
-            Box::new(Self::Const(i64::MIN)),
-            Box::new(Self::Const(i64::MAX)),
-        )
-    }
-
-    pub fn any32() -> Self {
-        Self::Range(
-            Box::new(Self::Const(0)),
-            Box::new(Self::Const(u32::MAX as i64)),
-        )
-    }
-
     pub fn add_offset(&self, off: i64) -> Self {
         Self::Add(Box::new(self.clone()), Box::new(Self::Const(off))).simplify()
     }
 
-    pub fn add(self, other: Self) -> Option<Self> {
-        todo!()
+    pub fn add(self, other: Self) -> Self {
+        Self::Add(Box::new(self), Box::new(other)).simplify()
     }
 
     pub fn shl(self, shift: u8) -> Option<Self> {
