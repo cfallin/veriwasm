@@ -176,25 +176,13 @@ pub fn validate_heap(
     code: &[u8],
     basic_blocks: &[Range<usize>],
     cfg_edges: &[(usize, usize)],
-    heap_strategy: HeapStrategy,
+    heap_strategy: &HeapStrategy,
 ) -> Result<(), ValidationError> {
     log::debug!(
         "validate_heap: basic_blocks = {:?}, edges = {:?}",
         basic_blocks,
         cfg_edges
     );
-    // For now, we don't support Wasmtime-style heap accesses.
-    // TODO: implement these:
-    // - Add a lattice value: VMCtxPtr
-    // - Add a rule: load from [VMCtxPtr + heap_base_ptr_offset] -> HeapBase
-    match heap_strategy {
-        HeapStrategy::HeapPtrFirstArgWithGuards => {}
-        _ => {
-            log::debug!("Unknown heap strategy: {:?}", heap_strategy);
-            return Err(ValidationError::HeapUnsafe);
-        }
-    }
-
     let (cfg, irmap, module) = func_body_and_bbs_to_cfg(code, basic_blocks, cfg_edges);
 
     // This entry point is designed to allow checking of a single
@@ -229,10 +217,18 @@ pub fn validate_heap(
     };
     let heap_result = run_worklist(&cfg, &irmap, &heap_analyzer);
     let name_addr_map = HashMap::new();
-    let heap_safe = check_heap(heap_result, &irmap, &heap_analyzer, &name_addr_map);
-    if !heap_safe {
-        return Err(ValidationError::HeapUnsafe);
-    }
+    let (vmctx_size, vmctx_fields) = match heap_strategy {
+        HeapStrategy::VMCtx(vmctx_size, vmctx_fields) => (*vmctx_size, vmctx_fields),
+    };
+
+    check_heap(
+        heap_result,
+        &irmap,
+        &heap_analyzer,
+        &name_addr_map,
+        vmctx_size,
+        &vmctx_fields[..],
+    )?;
 
     Ok(())
 }

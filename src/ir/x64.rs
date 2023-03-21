@@ -118,24 +118,35 @@ fn convert_operand(op: yaxpeax_x86::long_mode::Operand, memsize: ValSize) -> Val
             } else {
                 Value::Mem(
                     memsize,
-                    MemArgs::MemScale(
+                    MemArgs::Mem2ArgsScale(
                         convert_memarg_reg(reg1),
                         convert_memarg_reg(reg2),
-                        MemArg::Imm(ImmType::Signed, Size32, scale as i64),
+                        scale,
                     ),
                 )
             }
         }
         Operand::RegIndexBaseScaleDisp(reg1, reg2, scale, imm) => {
-            assert_eq!(scale, 1);
-            Value::Mem(
-                memsize,
-                MemArgs::Mem3Args(
-                    convert_memarg_reg(reg1),
-                    convert_memarg_reg(reg2),
-                    MemArg::Imm(ImmType::Signed, Size32, imm as i64),
-                ),
-            )
+            if scale == 1 {
+                Value::Mem(
+                    memsize,
+                    MemArgs::Mem3Args(
+                        convert_memarg_reg(reg1),
+                        convert_memarg_reg(reg2),
+                        MemArg::Imm(ImmType::Signed, Size32, imm as i64),
+                    ),
+                )
+            } else {
+                Value::Mem(
+                    memsize,
+                    MemArgs::Mem3ArgsScale(
+                        convert_memarg_reg(reg1),
+                        MemArg::Imm(ImmType::Signed, Size32, imm as i64),
+                        convert_memarg_reg(reg2),
+                        scale,
+                    ),
+                )
+            }
         } //mem[reg1 + reg2*c1 + c2]
         Operand::Nothing => panic!("Nothing Operand?"),
         op => {
@@ -302,28 +313,11 @@ fn call(instr: &X64Instruction, _metadata: &VwMetadata) -> Stmt {
 fn lea(instr: &X64Instruction, addr: &Addr) -> Vec<Stmt> {
     let dst = instr.operand(0);
     let src1 = instr.operand(1);
-    if let Operand::RegDisp(reg, disp) = src1 {
-        if reg == RegSpec::rip() {
-            //addr + instruction length + displacement
-            let length = 0u64.wrapping_offset(instr.len()).to_linear();
-            let target = (*addr as i64) + (length as i64) + (disp as i64);
-            return vec![Stmt::Unop(
-                Unopcode::Mov,
-                convert_operand(dst.clone(), get_operand_size(&dst).unwrap()),
-                Value::Imm(ImmType::Signed, Size64, target),
-            )];
-        }
-    }
-    match convert_operand(src1, get_operand_size(&dst).unwrap()) {
-        Value::Mem(_, memargs) => match memargs {
-            MemArgs::Mem1Arg(arg) => match arg {
-                MemArg::Imm(_, _, _val) => vec![unop(Unopcode::Mov, instr)],
-                _ => generic_clear(instr), //clear_dst(instr),
-            },
-            _ => generic_clear(instr), //clear_dst(instr),
-        },
-        _ => panic!("Illegal lea"),
-    }
+    vec![Stmt::Unop(
+        Unopcode::Lea,
+        convert_operand(dst.clone(), get_operand_size(&dst).unwrap()),
+        convert_operand(src1, get_operand_size(&dst).unwrap()),
+    )]
 }
 
 pub fn lift(instr: &X64Instruction, addr: &Addr, metadata: &VwMetadata, strict: bool) -> Vec<Stmt> {

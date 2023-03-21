@@ -8,7 +8,6 @@ use lattices::{ConstLattice, VarState};
 use loaders::types::VwMetadata;
 use std::default::Default;
 
-use HeapValue::*;
 use ValSize::*;
 use X86Regs::*;
 
@@ -21,7 +20,7 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
         let mut result: HeapLattice = Default::default();
         result
             .regs
-            .set_reg(Rdi, Size64, HeapValueLattice::new(VMCtx(0)));
+            .set_reg(Rdi, Size64, HeapValueLattice::new(HeapValue::VMCtx));
         result
     }
 
@@ -31,11 +30,9 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
                 if let &Value::Reg(rd, Size32) | &Value::Reg(rd, Size16) | &Value::Reg(rd, Size8) =
                     dst
                 {
-                    in_state.regs.set_reg(
-                        rd,
-                        Size64,
-                        HeapValueLattice::new(StaticBoundedVal(0..(1 << 32))),
-                    );
+                    in_state
+                        .regs
+                        .set_reg(rd, Size64, HeapValueLattice::new(HeapValue::any32()));
                 } else {
                     in_state.set_to_bot(dst)
                 }
@@ -63,13 +60,9 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
         // Any write to a 32-bit register will clear the upper 32 bits of the containing 64-bit
         // register.
         if let &Value::Reg(rd, Size32) = dst {
-            in_state.regs.set_reg(
-                rd,
-                Size64,
-                ConstLattice {
-                    v: Some(StaticBoundedVal(1 << 32)),
-                },
-            );
+            in_state
+                .regs
+                .set_reg(rd, Size64, HeapValueLattice::new(HeapValue::any32()));
             return;
         }
 
@@ -81,6 +74,13 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
             Unopcode::Movsx => {
                 in_state.set(dst, Default::default());
             }
+            Unopcode::Lea => match src {
+                Value::Mem(_, memargs) => {
+                    let v = self.aeval_memargs(in_state, memargs);
+                    in_state.set(dst, v);
+                }
+                _ => unreachable!(),
+            },
         }
     }
 
@@ -93,44 +93,28 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
         src2: &Value,
         _loc_idx: &LocIdx,
     ) {
-        match opcode {
-            Binopcode::Add => {
-                if let (
-                    &Value::Reg(rd, Size64),
-                    &Value::Reg(rs1, Size64),
-                    &Value::Reg(rs2, Size64),
-                ) = (dst, src1, src2)
-                {
-                    let rs1_val = in_state.regs.get_reg(rs1, Size64).v;
-                    let rs2_val = in_state.regs.get_reg(rs2, Size64).v;
-                    match (rs1_val, rs2_val) {
-                        (Some(HeapBase), Some(Bounded4GB)) | (Some(Bounded4GB), Some(HeapBase)) => {
-                            in_state
-                                .regs
-                                .set_reg(rd, Size64, ConstLattice { v: Some(HeapAddr) });
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
+        match (opcode, dst) {
+            (Binopcode::Add, &Value::Reg(rd, Size64)) => {
+                let src1 = self.aeval_value(in_state, src1);
+                let src2 = self.aeval_value(in_state, src2);
+                let sum = match (src1.v, src2.v) {
+                    (Some(src1), Some(src2)) => HeapValueLattice::new(src1.add(src2)),
+                    _ => HeapValueLattice::default(),
+                };
+                in_state.regs.set_reg(rd, Size64, sum);
             }
-            _ => {}
-        }
 
-        // Any write to a 32-bit register will clear the upper 32 bits of the containing 64-bit
-        // register.
-        if let &Value::Reg(rd, Size32) = dst {
-            in_state.regs.set_reg(
-                rd,
-                Size64,
-                ConstLattice {
-                    v: Some(Bounded4GB),
-                },
-            );
-            return;
+            // Any write to a 32-bit register will clear the upper 32
+            // bits of the containing 64-bit register.
+            (_, &Value::Reg(rd, Size32)) => {
+                in_state
+                    .regs
+                    .set_reg(rd, Size64, HeapValueLattice::new(HeapValue::any32()));
+            }
+            _ => {
+                in_state.set_to_bot(dst);
+            }
         }
-
-        in_state.set_to_bot(dst);
     }
 }
 
@@ -144,7 +128,7 @@ impl HeapAnalyzer {
 
             Value::Mem(memsize, memargs) => {
                 let ea = self.aeval_memargs(in_state, memargs);
-                todo!()
+                ea.map(|val| val.load())
             }
 
             Value::Reg(regnum, size) => {
@@ -156,11 +140,7 @@ impl HeapAnalyzer {
                 }
             }
 
-            Value::Imm(_, _, immval) if immval != -1 => {
-                HeapValueLattice::new(HeapValue::StaticBoundedVal((*immval as u64) + 1))
-            }
-
-            Value::RIPConst => HeapValueLattice::new(RIPConst),
+            Value::RIPConst => HeapValueLattice::new(HeapValue::TextPointer),
 
             _ => HeapValueLattice::default(),
         }
@@ -168,25 +148,53 @@ impl HeapAnalyzer {
 
     /// Evaluates to the effective address.
     pub fn aeval_memargs(&self, in_state: &HeapLattice, memargs: &MemArgs) -> HeapValueLattice {
-        match self {
-            MemArgs::Mem1Arg(arg1) => {}
-            MemArgs::Mem2Args(arg1, arg2) => {}
-            MemArgs::Mem3Args(arg1, arg2, arg3) => {}
-            MemArgs::MemScale(arg1, arg2, scale) => {}
-            // TODO: how is x86 [rax + 8*rbx + offset] handled?
+        match memargs {
+            MemArgs::Mem1Arg(arg1) => self.aeval_memarg(in_state, arg1),
+            MemArgs::Mem2Args(arg1, arg2) => {
+                let arg1 = self.aeval_memarg(in_state, arg1);
+                let arg2 = self.aeval_memarg(in_state, arg2);
+                match (arg1.v, arg2.v) {
+                    (Some(arg1), Some(arg2)) => HeapValueLattice::new(arg1.add(arg2)),
+                    _ => HeapValueLattice::default(),
+                }
+            }
+            MemArgs::Mem3Args(arg1, arg2, arg3) => {
+                let arg1 = self.aeval_memarg(in_state, arg1);
+                let arg2 = self.aeval_memarg(in_state, arg2);
+                let arg3 = self.aeval_memarg(in_state, arg3);
+                match (arg1.v, arg2.v, arg3.v) {
+                    (Some(arg1), Some(arg2), Some(arg3)) => {
+                        HeapValueLattice::new(arg1.add(arg2).add(arg3))
+                    }
+                    _ => HeapValueLattice::default(),
+                }
+            }
+            MemArgs::Mem2ArgsScale(arg1, arg2, scale) => {
+                let arg1 = self.aeval_memarg(in_state, arg1);
+                let arg2 = self.aeval_memarg(in_state, arg2);
+                match (arg1.v, arg2.v) {
+                    (Some(arg1), Some(arg2)) => HeapValueLattice::new(arg1.add(arg2.scale(*scale))),
+                    _ => HeapValueLattice::default(),
+                }
+            }
+            MemArgs::Mem3ArgsScale(arg1, arg2, arg3, scale) => {
+                let arg1 = self.aeval_memarg(in_state, arg1);
+                let arg2 = self.aeval_memarg(in_state, arg2);
+                let arg3 = self.aeval_memarg(in_state, arg3);
+                match (arg1.v, arg2.v, arg3.v) {
+                    (Some(arg1), Some(arg2), Some(arg3)) => {
+                        HeapValueLattice::new(arg1.add(arg2).add(arg3.scale(*scale)))
+                    }
+                    _ => HeapValueLattice::default(),
+                }
+            }
         }
     }
 
     pub fn aeval_memarg(&self, in_state: &HeapLattice, memarg: &MemArg) -> HeapValueLattice {
         match memarg {
-            MemArg::Reg(reg, size) => in_state.regs.get_reg(reg, size),
-            MemArg::Imm(ImmType::Signed, ValSize::Size32, imm) => HeapValueLattice::new(
-                HeapValue::StaticBoundedVal((i32::MIN as i64)..((i32::MAX as i64) + 1)),
-            ),
-            MemArg::Imm(ImmType::Unsigned, ValSize::Size32, imm) => {
-                HeapValueLattice::new(HeapValue::StaticBoundedVal(0..((u32::MAX as i64) + 1)))
-            }
-            MemArg::Imm(_, ValSize::Size64, imm) => HeapValueLattice::default(),
+            MemArg::Reg(reg, size) => in_state.regs.get_reg(*reg, *size),
+            MemArg::Imm(_, _, imm) => HeapValueLattice::new(HeapValue::Const(*imm)),
         }
     }
 }

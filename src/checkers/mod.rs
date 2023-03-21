@@ -1,3 +1,4 @@
+use crate::ValidationError;
 use crate::{analyses, ir, lattices};
 use analyses::AnalysisResult;
 use ir::types::*;
@@ -7,21 +8,17 @@ use lattices::LocIdx;
 
 mod heap_checker;
 
-/*      Public API for checker submodule      */
 pub use self::heap_checker::check_heap;
 
 pub trait Checker<State: Lattice + Clone> {
-    fn check(&self, result: AnalysisResult<State>) -> bool;
+    fn check(&self, result: AnalysisResult<State>) -> Result<(), ValidationError>;
     fn irmap(&self) -> &IRMap;
     fn aexec(&self, state: &mut State, ir_stmt: &Stmt, loc: &LocIdx);
 
-    fn check_state_at_statements(&self, result: AnalysisResult<State>) -> bool {
-        // for (block_addr, mut state) in result {
-        //     log::debug!(
-        //         "Checking block 0x{:x} with start state {:?}",
-        //         block_addr,
-        //         state
-        //     );
+    fn check_state_at_statements(
+        &self,
+        result: AnalysisResult<State>,
+    ) -> Result<(), ValidationError> {
         for block_addr in result.keys().sorted() {
             let mut state = result[block_addr].clone();
             log::debug!(
@@ -41,14 +38,28 @@ pub trait Checker<State: Lattice + Clone> {
                         addr: *addr,
                         idx: idx as u32,
                     };
-                    if !self.check_statement(&state, ir_stmt, &loc_idx) {
-                        return false;
-                    }
+                    self.check_pre_statement(&state, ir_stmt, &loc_idx)?;
                     self.aexec(&mut state, ir_stmt, &loc_idx);
+                    self.check_post_statement(&state, ir_stmt, &loc_idx)?;
                 }
             }
         }
-        true
+        Ok(())
     }
-    fn check_statement(&self, state: &State, ir_stmt: &Stmt, loc_idx: &LocIdx) -> bool;
+    fn check_pre_statement(
+        &self,
+        state: &State,
+        ir_stmt: &Stmt,
+        loc_idx: &LocIdx,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+    fn check_post_statement(
+        &self,
+        state: &State,
+        ir_stmt: &Stmt,
+        loc_idx: &LocIdx,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
 }

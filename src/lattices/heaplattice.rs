@@ -223,9 +223,8 @@ impl HeapValue {
         Self::Add(Box::new(self), Box::new(other)).simplify()
     }
 
-    pub fn shl(self, shift: u8) -> Self {
-        assert!(shift < 8);
-        Self::Scale(Box::new(self), 1u8 << shift).simplify()
+    pub fn scale(self, scale: u8) -> Self {
+        Self::Scale(Box::new(self), scale).simplify()
     }
 
     pub fn load(self) -> Self {
@@ -260,11 +259,19 @@ impl HeapValue {
             Self::Scale(a, _) => a.load_depth(),
             Self::Add(a, b) | Self::UMin(a, b) => std::cmp::max(a.load_depth(), b.load_depth()),
             Self::Load(a) => a.load_depth() + 1,
+            Self::Unknown => 0,
         }
     }
 
     pub fn clamp32(self) -> Self {
         Self::UMin(Box::new(self), Box::new(Self::Const(u32::MAX as i64)))
+    }
+
+    pub fn any32() -> Self {
+        Self::UMin(
+            Box::new(Self::Unknown),
+            Box::new(Self::Const(u32::MAX as i64)),
+        )
     }
 
     /// Determine a bound on a value: either a static bound, or a

@@ -85,10 +85,11 @@ impl ValSize {
 
 #[derive(Debug, Clone)]
 pub enum MemArgs {
-    Mem1Arg(MemArg),                  // [arg]
-    Mem2Args(MemArg, MemArg),         // [arg1 + arg2]
-    Mem3Args(MemArg, MemArg, MemArg), // [arg1 + arg2 + arg3]
-    MemScale(MemArg, MemArg, MemArg), // [arg1 + arg2 * arg3]
+    Mem1Arg(MemArg),                           // [arg]
+    Mem2Args(MemArg, MemArg),                  // [arg1 + arg2]
+    Mem3Args(MemArg, MemArg, MemArg),          // [arg1 + arg2 + arg3]
+    Mem2ArgsScale(MemArg, MemArg, u8),         // [arg1 + arg2 * scale]
+    Mem3ArgsScale(MemArg, MemArg, MemArg, u8), // [arg1 + arg2 + arg3 * scale]
 }
 #[derive(Debug, Clone)]
 pub enum MemArg {
@@ -109,9 +110,10 @@ impl MemArgs {
     pub fn extract_stack_offset(&self) -> i64 {
         match self {
             MemArgs::Mem1Arg(_memarg) => 0,
-            MemArgs::Mem2Args(_memarg1, memarg2) => memarg2.to_imm(),
-            MemArgs::Mem3Args(_memarg1, _memarg2, _memarg3)
-            | MemArgs::MemScale(_memarg1, _memarg2, _memarg3) => {
+            MemArgs::Mem2Args(_, memarg2) => memarg2.to_imm(),
+            MemArgs::Mem3Args(_, _, _)
+            | MemArgs::Mem2ArgsScale(_, _, _)
+            | MemArgs::Mem3ArgsScale(_, _, _, _) => {
                 panic!("extract_stack_offset failed")
             }
         }
@@ -256,8 +258,11 @@ impl Value {
             use MemArgs::*;
             match memargs {
                 Mem1Arg(memarg) => return memarg.is_rsp(),
-                Mem2Args(memarg1, memarg2) => return memarg1.is_rsp() || memarg2.is_rsp(),
-                Mem3Args(memarg1, memarg2, memarg3) | MemScale(memarg1, memarg2, memarg3) => {
+                Mem2Args(memarg1, memarg2) | Mem2ArgsScale(memarg1, memarg2, _) => {
+                    return memarg1.is_rsp() || memarg2.is_rsp()
+                }
+                Mem3Args(memarg1, memarg2, memarg3)
+                | Mem3ArgsScale(memarg1, memarg2, memarg3, _) => {
                     return memarg1.is_rsp() || memarg2.is_rsp() || memarg3.is_rsp()
                 }
             }
@@ -270,8 +275,11 @@ impl Value {
         if let Value::Mem(_size, memargs) = self {
             match memargs {
                 Mem1Arg(memarg) => return memarg.is_rbp(),
-                Mem2Args(memarg1, memarg2) => return memarg1.is_rbp() || memarg2.is_rbp(),
-                Mem3Args(memarg1, memarg2, memarg3) | MemScale(memarg1, memarg2, memarg3) => {
+                Mem2Args(memarg1, memarg2) | Mem2ArgsScale(memarg1, memarg2, _) => {
+                    return memarg1.is_rbp() || memarg2.is_rbp()
+                }
+                Mem3Args(memarg1, memarg2, memarg3)
+                | Mem3ArgsScale(memarg1, memarg2, memarg3, _) => {
                     return memarg1.is_rbp() || memarg2.is_rbp() || memarg3.is_rbp()
                 }
             }
@@ -308,10 +316,11 @@ pub enum Stmt {
     ProbeStack(u64),                               // probestack
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unopcode {
     Mov,
     Movsx,
+    Lea,
 }
 #[derive(Debug, Clone)]
 pub enum Binopcode {

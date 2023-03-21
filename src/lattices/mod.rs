@@ -128,12 +128,12 @@ impl<T: Eq + Clone + Debug> ConstLattice<T> {
     }
 
     pub fn map<F: Fn(T) -> T>(&self, f: F) -> Self {
-        Self { v: self.v.map(f) }
+        Self { v: self.v.clone().map(f) }
     }
 
     pub fn flat_map<F: Fn(T) -> Option<T>>(&self, f: F) -> Self {
         Self {
-            v: self.v.and_then(f),
+            v: self.v.clone().and_then(f),
         }
     }
 }
