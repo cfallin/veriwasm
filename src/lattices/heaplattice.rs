@@ -1,4 +1,5 @@
 use crate::lattices::{ConstLattice, VariableState};
+use crate::VMCtxField;
 use std::ops::Range;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -7,9 +8,13 @@ pub enum HeapValue {
     VMCtx,
     /// A value loaded from a given location.
     Load(Box<HeapValue>),
-    /// An offset from a given location.
+    /// An offset from a given location. Cannot wrap: we go to the
+    /// lattice's Bot value if we cannot prove this when analyzing
+    /// range.
     Add(Box<HeapValue>, Box<HeapValue>),
-    /// A multiplication (scaling) operation.
+    /// A multiplication (scaling) operation. Cannot wrap: we go to
+    /// the lattice's Bot value if we cannot prove this when analyzing
+    /// range.
     Scale(Box<HeapValue>, u8),
     /// A single known constant value.
     Const(i64),
@@ -17,6 +22,10 @@ pub enum HeapValue {
     TextPointer,
     /// An unsigned min (clamping) operation.
     UMin(Box<HeapValue>, Box<HeapValue>),
+    /// Some unknown value. Note that this is distinguished from Bot
+    /// because it is a definite, concrete value, rather than a
+    /// potential conflict.
+    Unknown,
 }
 
 /// A tag for a bound value. Corresponds to the field-spec index in
@@ -36,7 +45,7 @@ impl HeapValue {
     /// Validate that expression is in "normal form":
     ///
     /// ```plain
-    /// - Atom := VMCtx | Load(_) | Const(_) | TextPointer
+    /// - Atom := VMCtx | Load(_) | Const(_) | TextPointer | Unknown
     /// - AtomSummand := Scale(Atom, _) | Atom
     /// - AtomSum := Add(AtomSum, AtomSum) | AtomSummand
     /// - Min := UMin(AtomSum, AtomSum)
@@ -66,17 +75,19 @@ impl HeapValue {
 
     fn is_atom(&self) -> bool {
         match self {
-            Self::VMCtx | Self::Load(_) | Self::Const(_) | Self::TextPointer => true,
+            Self::VMCtx | Self::Load(_) | Self::Const(_) | Self::TextPointer | Self::Unknown => {
+                true
+            }
             _ => false,
         }
     }
 
     /// Simplify an expression to normal form.
     ///
-    /// - Add distributes over UMin if no wrapping (TODO: handle wrapping somehow)
+    /// - Add-no-wrap distributes over UMin
     ///   - `simplify(Add(UMin(a, b), c))` ->
     ///     `UMin(simplify(Add(a, c)), simplify(Add(b, c)))`
-    /// - Scale distributes over UMin:
+    /// - Scale-no-wrap distributes over UMin:
     ///   - `simplify(Scale(UMin(a, b), k))` ->
     ///     `UMin(simplify(Scale(a, k)), simplify(Scale(b, k)))`
     /// - Scale distributes over Add:
@@ -115,7 +126,7 @@ impl HeapValue {
                     (Self::Const(a), b) => {
                         Self::UMin(Box::new(b), Box::new(Self::Const(a))).simplify()
                     }
-                    (Self::UMin(a, b), c) => {
+                    (Self::UMin(a, b), c) | (c, Self::UMin(a, b)) => {
                         let a = a.simplify();
                         let b = b.simplify();
                         match (b, c) {
@@ -147,6 +158,35 @@ impl HeapValue {
                     (Self::Const(a), Self::Const(b)) => Self::Const(a.wrapping_add(b)),
                     // `Add(Const(a), b)` -> `Add(b, Const(a))`
                     (Self::Const(a), b) => Self::Add(Box::new(b), Box::new(Self::Const(a))),
+                    (Self::Add(a, b), c) | (c, Self::Add(a, b)) => {
+                        let a = a.simplify();
+                        let b = b.simplify();
+                        match (b, c) {
+                            // `Add(Add(a, Const(b)), Const(c))` -> `Add(a, Const(min(b, c)))`
+                            (Self::Const(b), Self::Const(c)) => {
+                                Self::Add(Box::new(a), Box::new(Self::Const(b.wrapping_add(c))))
+                            }
+                            // `Add(Add(a, Const(b)), c)` -> `Add(Add(a, c), Const(b))`
+                            (Self::Const(b), c) => Self::Add(
+                                Box::new(Self::Add(Box::new(a), Box::new(c))),
+                                Box::new(Self::Const(b)),
+                            ),
+                            // `Add(Add(a, b), c)` -> `Add(Add(a, b), c)`
+                            (b, c) => Self::Add(
+                                Box::new(Self::Add(Box::new(a), Box::new(b))),
+                                Box::new(c),
+                            ),
+                        }
+                    }
+                    // `Add(UMin(a, b), c)` -> `UMin(Add(a, c), Add(b, c))`
+                    (Self::UMin(a, b), c) | (c, Self::UMin(a, b)) => {
+                        let a = a.simplify();
+                        let b = b.simplify();
+                        Self::UMin(
+                            Box::new(Self::Add(Box::new(a), Box::new(c.clone())).simplify()),
+                            Box::new(Self::Add(Box::new(b), Box::new(c.clone())).simplify()),
+                        )
+                    }
 
                     // `Add(a, b)` -> `Add(a, b)`
                     (a, b) => Self::Add(Box::new(a), Box::new(b)),
@@ -155,10 +195,6 @@ impl HeapValue {
             Self::Scale(a, k) => {
                 let a = a.simplify();
                 match a {
-                    // TODO: have to handle wrapping -- consider:
-                    // Scale(UMin(0x3fff_ffff_ffff_ffff, 0x8000_0000_0000_0000), 2) ->
-                    // Scale(0x3fff_ffff_ffff_ffff, 2) -> 0x7fff_ffff_ffff_fffe
-                    // UMin(0x7fff_ffff_ffff_fffe, 0) -> 0
                     // `Scale(UMin(a, b), k)` -> `UMin(Scale(a, k), Scale(b, k))`
                     Self::UMin(a, b) => Self::UMin(
                         Box::new(Self::Scale(a, k).simplify()),
@@ -187,15 +223,238 @@ impl HeapValue {
         Self::Add(Box::new(self), Box::new(other)).simplify()
     }
 
-    pub fn shl(self, shift: u8) -> Option<Self> {
-        todo!()
+    pub fn shl(self, shift: u8) -> Self {
+        assert!(shift < 8);
+        Self::Scale(Box::new(self), 1u8 << shift).simplify()
     }
 
-    pub fn load(self) -> Option<Self> {
-        todo!()
+    pub fn load(self) -> Self {
+        Self::Load(Box::new(self))
+    }
+
+    /// Truncate depth of expression at a given number of loads.
+    pub fn truncate(self, max_load_depth: usize) -> Self {
+        if self.load_depth() <= max_load_depth {
+            self
+        } else {
+            match self {
+                Self::Load(_) if max_load_depth == 0 => Self::Unknown,
+                Self::Load(addr) => Self::Load(Box::new(addr.truncate(max_load_depth - 1))),
+                Self::Add(a, b) => Self::Add(
+                    Box::new(a.truncate(max_load_depth)),
+                    Box::new(b.truncate(max_load_depth)),
+                ),
+                Self::Scale(a, k) => Self::Scale(Box::new(a.truncate(max_load_depth)), k),
+                Self::UMin(a, b) => Self::UMin(
+                    Box::new(a.truncate(max_load_depth)),
+                    Box::new(b.truncate(max_load_depth)),
+                ),
+                Self::Const(_) | Self::TextPointer | Self::Unknown | Self::VMCtx => unreachable!(),
+            }
+        }
+    }
+
+    fn load_depth(&self) -> usize {
+        match self {
+            Self::VMCtx | Self::TextPointer | Self::Const(_) => 0,
+            Self::Scale(a, _) => a.load_depth(),
+            Self::Add(a, b) | Self::UMin(a, b) => std::cmp::max(a.load_depth(), b.load_depth()),
+            Self::Load(a) => a.load_depth() + 1,
+        }
     }
 
     pub fn clamp32(self) -> Self {
+        Self::UMin(Box::new(self), Box::new(Self::Const(u32::MAX as i64)))
+    }
+
+    /// Determine a bound on a value: either a static bound, or a
+    /// symbolic bound based on the given bound variable.
+    pub fn find_bound<T: Copy, P: Fn(&HeapValue) -> Option<T>>(
+        &self,
+        bound_pred: &P,
+    ) -> Bounded<T> {
+        if let Some(bound_token) = bound_pred(self) {
+            return Bounded::Dynamic {
+                bound: bound_token,
+                scale: 1,
+                offset: 0,
+            };
+        }
+
+        match self {
+            Self::VMCtx | Self::Unknown | Self::Const(_) | Self::Load(_) => Bounded::None,
+            Self::TextPointer => Bounded::TextPointer,
+            Self::Add(a, b) => {
+                let a = a.find_bound(bound_pred);
+                let b = b.find_bound(bound_pred);
+                match (a, b) {
+                    (Bounded::Static { max: max_a }, Bounded::Static { max: max_b }) => {
+                        if let Some(sum) = max_a.checked_add(max_b) {
+                            Bounded::Static { max: sum }
+                        } else {
+                            Bounded::None
+                        }
+                    }
+                    (
+                        Bounded::Static { max },
+                        Bounded::Dynamic {
+                            bound,
+                            scale,
+                            offset,
+                        },
+                    )
+                    | (
+                        Bounded::Dynamic {
+                            bound,
+                            scale,
+                            offset,
+                        },
+                        Bounded::Static { max },
+                    ) => {
+                        if let Some(sum) = max.checked_add(offset) {
+                            Bounded::Dynamic {
+                                bound,
+                                scale,
+                                offset: sum,
+                            }
+                        } else {
+                            Bounded::None
+                        }
+                    }
+                    (Bounded::Dynamic { .. }, Bounded::Dynamic { .. }) => Bounded::None,
+                    (Bounded::TextPointer, _) | (_, Bounded::TextPointer) => Bounded::TextPointer,
+                    (Bounded::None, _) | (_, Bounded::None) => Bounded::None,
+                }
+            }
+            Self::Scale(a, k) => {
+                let a = a.find_bound(bound_pred);
+                match a {
+                    Bounded::TextPointer | Bounded::None => Bounded::None,
+                    Bounded::Static { max } => {
+                        if let Some(product) = max.checked_mul(*k as u64) {
+                            Bounded::Static { max: product }
+                        } else {
+                            Bounded::None
+                        }
+                    }
+                    Bounded::Dynamic {
+                        bound,
+                        scale,
+                        offset,
+                    } => {
+                        if let (Some(scale_product), Some(offset_product)) =
+                            (scale.checked_mul(*k), offset.checked_mul(*k as u64))
+                        {
+                            Bounded::Dynamic {
+                                bound,
+                                scale: scale_product,
+                                offset: offset_product,
+                            }
+                        } else {
+                            Bounded::None
+                        }
+                    }
+                }
+            }
+            Self::UMin(a, b) => {
+                let a = a.find_bound(bound_pred);
+                let b = b.find_bound(bound_pred);
+                match (a, b) {
+                    (Bounded::TextPointer, _)
+                    | (_, Bounded::TextPointer)
+                    | (Bounded::None, _)
+                    | (_, Bounded::None) => Bounded::None,
+                    (Bounded::Static { max: max_a }, Bounded::Static { max: max_b }) => {
+                        Bounded::Static {
+                            max: std::cmp::min(max_a, max_b),
+                        }
+                    }
+                    // We can take a bound on either `a` or `b` as the
+                    // overall bound, with some potential loss of
+                    // precision. Here we heuristically choose a
+                    // dynamic bound over a static bound to propagate
+                    // upward, and the first if both are dynamic.
+                    (
+                        Bounded::Dynamic {
+                            bound,
+                            scale,
+                            offset,
+                        },
+                        _,
+                    )
+                    | (
+                        _,
+                        Bounded::Dynamic {
+                            bound,
+                            scale,
+                            offset,
+                        },
+                    ) => Bounded::Dynamic {
+                        bound,
+                        scale,
+                        offset,
+                    },
+                }
+            }
+        }
+    }
+
+    /// Determine whether an access to an address described by this
+    /// HeapValue is safely within the given region descriptor.
+    pub fn is_within(&self, field: &VMCtxField) -> bool {
+        let (base, bound): (HeapValue, HeapValue) = match field {
+            VMCtxField::StaticRegion {
+                base_ptr_vmctx_offset,
+                heap_and_guard_size,
+            } => (
+                HeapValue::Load(Box::new(HeapValue::Add(
+                    Box::new(HeapValue::VMCtx),
+                    Box::new(HeapValue::Const(*base_ptr_vmctx_offset as i64)),
+                ))),
+                HeapValue::Const(*heap_and_guard_size as i64),
+            ),
+            VMCtxField::DynamicRegion {
+                base_ptr_vmctx_offset,
+                len_vmctx_offset,
+                element_size,
+            } => {
+                let len = HeapValue::Load(Box::new(HeapValue::Add(
+                    Box::new(HeapValue::VMCtx),
+                    Box::new(HeapValue::Const(*len_vmctx_offset as i64)),
+                )));
+                let len = if *element_size != 1 {
+                    assert!(*element_size < 256);
+                    HeapValue::Scale(Box::new(len), *element_size as u8)
+                } else {
+                    len
+                };
+                (
+                    HeapValue::Load(Box::new(HeapValue::Add(
+                        Box::new(HeapValue::VMCtx),
+                        Box::new(HeapValue::Const(*base_ptr_vmctx_offset as i64)),
+                    ))),
+                    len,
+                )
+            }
+            VMCtxField::Field { offset, len } => {
+                // Should not be reachable at top level.
+                unreachable!()
+            }
+            VMCtxField::Import {
+                ptr_vmctx_offset,
+                kind,
+            } => {
+                todo!()
+            }
+        };
+
         todo!()
     }
+}
+
+pub enum Bounded<T> {
+    Static { max: u64 },
+    Dynamic { bound: T, scale: u8, offset: u64 },
+    TextPointer,
+    None,
 }
