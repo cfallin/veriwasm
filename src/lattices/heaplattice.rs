@@ -1,5 +1,6 @@
 use crate::lattices::{ConstLattice, VariableState};
 use crate::VMCtxField;
+use std::fmt::Debug;
 use std::ops::Range;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -276,7 +277,11 @@ impl HeapValue {
 
     /// Determine a bound on a value: either a static bound, or a
     /// symbolic bound based on the given bound variable.
-    pub fn find_bound<T: Copy, Base: Fn(&HeapValue) -> bool, Bound: Fn(&HeapValue) -> Option<T>>(
+    pub fn find_bound<
+        T: Copy + Clone + Debug,
+        Base: Fn(&HeapValue) -> bool,
+        Bound: Fn(&HeapValue) -> Option<T>,
+    >(
         &self,
         base: &Base,
         bound: &Bound,
@@ -298,8 +303,12 @@ impl HeapValue {
         }
 
         match self {
-            Self::VMCtx | Self::Unknown | Self::Const(_) | Self::Load(_) => Bounded::None,
+            Self::VMCtx | Self::Unknown | Self::Load(_) => Bounded::None,
             Self::TextPointer => Bounded::TextPointer,
+            Self::Const(val) => Bounded::Static {
+                has_base: false,
+                max: *val as u64,
+            },
             Self::Add(a, b) => {
                 let a = a.find_bound(base, bound);
                 let b = b.find_bound(base, bound);
@@ -424,6 +433,7 @@ impl HeapValue {
             Self::UMin(a, b) => {
                 let a = a.find_bound(base, bound);
                 let b = b.find_bound(base, bound);
+                log::trace!("find_bound: UMin ({:?}): a = {:?} b = {:?}", self, a, b);
                 match (a, b) {
                     (Bounded::TextPointer, _)
                     | (_, Bounded::TextPointer)
@@ -502,6 +512,13 @@ impl HeapValue {
             }
         });
 
+        log::debug!(
+            "base: {:?} bound: {:?} addr_bound: {:?}",
+            base,
+            bound,
+            addr_bound
+        );
+
         match (addr_bound, bound) {
             (Bounded::Static { has_base, max }, HeapValue::Const(bound))
                 if has_base && max < (*bound as u64) =>
@@ -531,7 +548,8 @@ impl HeapValue {
     }
 }
 
-pub enum Bounded<T> {
+#[derive(Clone, Debug)]
+pub enum Bounded<T: Clone + Debug> {
     Static {
         has_base: bool,
         max: u64,
@@ -546,7 +564,7 @@ pub enum Bounded<T> {
     TextPointer,
     None,
 }
-impl<T> Bounded<T> {
+impl<T: Clone + Debug> Bounded<T> {
     fn has_base(&self) -> bool {
         match self {
             Self::Static { has_base, .. } | Self::Dynamic { has_base, .. } => *has_base,
@@ -624,11 +642,18 @@ impl VMCtxFieldExprs {
         }
     }
 
-    pub fn new(fields: &[VMCtxField]) -> Self {
-        let base_bound = fields
+    pub fn new(fields: &[VMCtxField], vmctx_size: usize) -> Self {
+        let mut base_bound = fields
             .iter()
             .map(|field| Self::field_to_base_bound(HeapValue::VMCtx, field))
             .collect::<Vec<_>>();
+        base_bound.push(Self::field_to_base_bound(
+            HeapValue::VMCtx,
+            &VMCtxField::Field {
+                offset: 0,
+                len: vmctx_size,
+            },
+        ));
         Self { base_bound }
     }
 }

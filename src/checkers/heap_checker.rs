@@ -28,7 +28,7 @@ pub fn check_heap(
     vmctx_size: usize,
     fields: &[VMCtxField],
 ) -> Result<(), ValidationError> {
-    let base_bounds = VMCtxFieldExprs::new(fields);
+    let base_bounds = VMCtxFieldExprs::new(fields, vmctx_size);
     HeapChecker {
         irmap,
         analyzer,
@@ -121,10 +121,18 @@ impl HeapChecker<'_> {
             None => return Err(ValidationError::HeapUnsafe),
         };
         for (base, bound) in &self.base_bounds.base_bound {
+            log::debug!(
+                "Checking accessed addr {:?} (size {:?}) against base {:?} bound {:?}",
+                addr,
+                sz,
+                base,
+                bound
+            );
             if addr.addr_ok(base, bound, sz.into_bytes() as usize) {
                 return Ok(());
             }
         }
+        log::debug!("INVALID (offset 0x{:x}): {:?}", loc_idx.addr, addr);
         Err(ValidationError::HeapUnsafe)
     }
 }
