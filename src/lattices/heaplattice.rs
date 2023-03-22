@@ -221,7 +221,10 @@ impl HeapValue {
     }
 
     pub fn add(self, other: Self) -> Self {
-        Self::Add(Box::new(self), Box::new(other)).simplify()
+        log::trace!("add: {:?} + {:?}", self, other);
+        let result = Self::Add(Box::new(self), Box::new(other)).simplify();
+        log::trace!(" -> {:?}", result);
+        result
     }
 
     pub fn scale(self, scale: u8) -> Self {
@@ -265,7 +268,10 @@ impl HeapValue {
     }
 
     pub fn clamp32(self) -> Self {
-        Self::UMin(Box::new(self), Box::new(Self::Const(u32::MAX as i64)))
+        log::trace!("clamp32: {:?}", self);
+        let result = Self::UMin(Box::new(self), Box::new(Self::Const(u32::MAX as i64)));
+        log::trace!(" -> {:?}", result);
+        result
     }
 
     pub fn any32() -> Self {
