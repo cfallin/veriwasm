@@ -74,6 +74,7 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
             Unopcode::Movsx => {
                 in_state.set(dst, Default::default());
             }
+
             Unopcode::Lea => match src {
                 Value::Mem(_, memargs) => {
                     let v = self.aeval_memargs(in_state, memargs);
@@ -104,6 +105,12 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
                 in_state.regs.set_reg(rd, Size64, sum);
             }
 
+            (Binopcode::Cmp, _) => {
+                let src1 = self.aeval_value(in_state, src1);
+                let src2 = self.aeval_value(in_state, src2);
+                in_state.regs.flags_cmp = Some((src1, src2));
+            }
+
             // Any write to a 32-bit register will clear the upper 32
             // bits of the containing 64-bit register.
             (_, &Value::Reg(rd, Size32)) => {
@@ -111,6 +118,7 @@ impl AbstractAnalyzer<HeapLattice> for HeapAnalyzer {
                     .regs
                     .set_reg(rd, Size64, HeapValueLattice::new(HeapValue::any32()));
             }
+
             _ => {
                 in_state.set_to_bot(dst);
             }

@@ -276,15 +276,24 @@ impl HeapValue {
 
     /// Determine a bound on a value: either a static bound, or a
     /// symbolic bound based on the given bound variable.
-    pub fn find_bound<T: Copy, P: Fn(&HeapValue) -> Option<T>>(
+    pub fn find_bound<T: Copy, Base: Fn(&HeapValue) -> bool, Bound: Fn(&HeapValue) -> Option<T>>(
         &self,
-        bound_pred: &P,
+        base: &Base,
+        bound: &Bound,
     ) -> Bounded<T> {
-        if let Some(bound_token) = bound_pred(self) {
+        if let Some(bound_token) = bound(self) {
             return Bounded::Dynamic {
                 bound: bound_token,
                 scale: 1,
                 offset: 0,
+                has_base: false,
+                static_max: 0,
+            };
+        }
+        if base(self) {
+            return Bounded::Static {
+                has_base: true,
+                max: 0,
             };
         }
 
@@ -292,40 +301,73 @@ impl HeapValue {
             Self::VMCtx | Self::Unknown | Self::Const(_) | Self::Load(_) => Bounded::None,
             Self::TextPointer => Bounded::TextPointer,
             Self::Add(a, b) => {
-                let a = a.find_bound(bound_pred);
-                let b = b.find_bound(bound_pred);
+                let a = a.find_bound(base, bound);
+                let b = b.find_bound(base, bound);
                 match (a, b) {
-                    (Bounded::Static { max: max_a }, Bounded::Static { max: max_b }) => {
-                        if let Some(sum) = max_a.checked_add(max_b) {
-                            Bounded::Static { max: sum }
-                        } else {
+                    (
+                        Bounded::Static {
+                            has_base: has_base_a,
+                            max: max_a,
+                        },
+                        Bounded::Static {
+                            has_base: has_base_b,
+                            max: max_b,
+                        },
+                    ) => {
+                        if has_base_a && has_base_b {
                             Bounded::None
+                        } else {
+                            if let Some(sum) = max_a.checked_add(max_b) {
+                                Bounded::Static {
+                                    has_base: has_base_a || has_base_b,
+                                    max: sum,
+                                }
+                            } else {
+                                Bounded::None
+                            }
                         }
                     }
                     (
-                        Bounded::Static { max },
+                        Bounded::Static {
+                            has_base: has_base_a,
+                            max,
+                        },
                         Bounded::Dynamic {
+                            has_base: has_base_b,
                             bound,
                             scale,
                             offset,
+                            static_max,
                         },
                     )
                     | (
                         Bounded::Dynamic {
+                            has_base: has_base_b,
                             bound,
                             scale,
                             offset,
+                            static_max,
                         },
-                        Bounded::Static { max },
+                        Bounded::Static {
+                            has_base: has_base_a,
+                            max,
+                        },
                     ) => {
-                        if let Some(sum) = max.checked_add(offset) {
-                            Bounded::Dynamic {
-                                bound,
-                                scale,
-                                offset: sum,
-                            }
-                        } else {
+                        if has_base_a && has_base_b {
                             Bounded::None
+                        } else {
+                            if let Some(sum) = max.checked_add(offset) {
+                                let static_max = static_max.saturating_add(max);
+                                Bounded::Dynamic {
+                                    has_base: has_base_a || has_base_b,
+                                    bound,
+                                    scale,
+                                    offset: sum,
+                                    static_max,
+                                }
+                            } else {
+                                Bounded::None
+                            }
                         }
                     }
                     (Bounded::Dynamic { .. }, Bounded::Dynamic { .. }) => Bounded::None,
@@ -334,46 +376,76 @@ impl HeapValue {
                 }
             }
             Self::Scale(a, k) => {
-                let a = a.find_bound(bound_pred);
+                let a = a.find_bound(base, bound);
                 match a {
                     Bounded::TextPointer | Bounded::None => Bounded::None,
-                    Bounded::Static { max } => {
-                        if let Some(product) = max.checked_mul(*k as u64) {
-                            Bounded::Static { max: product }
-                        } else {
+                    Bounded::Static { has_base, max } => {
+                        if has_base {
                             Bounded::None
+                        } else {
+                            if let Some(product) = max.checked_mul(*k as u64) {
+                                Bounded::Static {
+                                    has_base: false,
+                                    max: product,
+                                }
+                            } else {
+                                Bounded::None
+                            }
                         }
                     }
                     Bounded::Dynamic {
+                        has_base,
                         bound,
                         scale,
                         offset,
+                        static_max,
                     } => {
-                        if let (Some(scale_product), Some(offset_product)) =
-                            (scale.checked_mul(*k), offset.checked_mul(*k as u64))
-                        {
-                            Bounded::Dynamic {
-                                bound,
-                                scale: scale_product,
-                                offset: offset_product,
-                            }
-                        } else {
+                        if has_base {
                             Bounded::None
+                        } else {
+                            if let (Some(scale_product), Some(offset_product)) =
+                                (scale.checked_mul(*k), offset.checked_mul(*k as u64))
+                            {
+                                let static_max = static_max.saturating_mul(*k as u64);
+                                Bounded::Dynamic {
+                                    has_base: false,
+                                    bound,
+                                    scale: scale_product,
+                                    offset: offset_product,
+                                    static_max,
+                                }
+                            } else {
+                                Bounded::None
+                            }
                         }
                     }
                 }
             }
             Self::UMin(a, b) => {
-                let a = a.find_bound(bound_pred);
-                let b = b.find_bound(bound_pred);
+                let a = a.find_bound(base, bound);
+                let b = b.find_bound(base, bound);
                 match (a, b) {
                     (Bounded::TextPointer, _)
                     | (_, Bounded::TextPointer)
                     | (Bounded::None, _)
                     | (_, Bounded::None) => Bounded::None,
-                    (Bounded::Static { max: max_a }, Bounded::Static { max: max_b }) => {
+                    (
                         Bounded::Static {
-                            max: std::cmp::min(max_a, max_b),
+                            has_base: has_base_a,
+                            max: max_a,
+                        },
+                        Bounded::Static {
+                            has_base: has_base_b,
+                            max: max_b,
+                        },
+                    ) => {
+                        if has_base_a == has_base_b {
+                            Bounded::Static {
+                                has_base: has_base_a,
+                                max: std::cmp::min(max_a, max_b),
+                            }
+                        } else {
+                            Bounded::None
                         }
                     }
                     // We can take a bound on either `a` or `b` as the
@@ -383,39 +455,126 @@ impl HeapValue {
                     // upward, and the first if both are dynamic.
                     (
                         Bounded::Dynamic {
+                            has_base: has_base_a,
                             bound,
                             scale,
                             offset,
+                            static_max,
                         },
-                        _,
+                        other,
                     )
                     | (
-                        _,
+                        other,
                         Bounded::Dynamic {
+                            has_base: has_base_a,
                             bound,
                             scale,
                             offset,
+                            static_max,
                         },
-                    ) => Bounded::Dynamic {
-                        bound,
-                        scale,
-                        offset,
-                    },
+                    ) => {
+                        if other.has_base() == has_base_a {
+                            Bounded::Dynamic {
+                                has_base: has_base_a,
+                                bound,
+                                scale,
+                                offset,
+                                static_max: std::cmp::min(static_max, other.static_max()),
+                            }
+                        } else {
+                            Bounded::None
+                        }
+                    }
                 }
             }
         }
     }
 
     /// Determine whether an access to an address described by this
-    /// HeapValue is safely within the given region descriptor.
-    pub fn is_within(&self, field: &VMCtxField) -> bool {
-        let (base, bound): (HeapValue, HeapValue) = match field {
+    /// HeapValue is safely within the given region.
+    pub fn addr_ok(&self, base: &HeapValue, bound: &HeapValue, access_size: usize) -> bool {
+        // Get a bound on our access.
+        let addr_bound = self.find_bound(&|val| val == base, &|val| {
+            if val == bound {
+                Some(())
+            } else {
+                None
+            }
+        });
+
+        match (addr_bound, bound) {
+            (Bounded::Static { has_base, max }, HeapValue::Const(bound))
+                if has_base && max < (*bound as u64) =>
+            {
+                true
+            }
+            (
+                Bounded::Dynamic {
+                    has_base,
+                    static_max,
+                    ..
+                },
+                HeapValue::Const(bound),
+            ) if has_base && static_max < (*bound as u64) => true,
+            (
+                Bounded::Dynamic {
+                    has_base,
+                    bound,
+                    scale,
+                    offset,
+                    ..
+                },
+                _,
+            ) if has_base && scale == 1 && offset == 0 => true,
+            _ => false,
+        }
+    }
+}
+
+pub enum Bounded<T> {
+    Static {
+        has_base: bool,
+        max: u64,
+    },
+    Dynamic {
+        has_base: bool,
+        bound: T,
+        scale: u8,
+        offset: u64,
+        static_max: u64,
+    },
+    TextPointer,
+    None,
+}
+impl<T> Bounded<T> {
+    fn has_base(&self) -> bool {
+        match self {
+            Self::Static { has_base, .. } | Self::Dynamic { has_base, .. } => *has_base,
+            _ => false,
+        }
+    }
+    fn static_max(&self) -> u64 {
+        match self {
+            Self::Static { max, .. } => *max,
+            Self::Dynamic { static_max, .. } => *static_max,
+            _ => u64::MAX,
+        }
+    }
+}
+
+pub struct VMCtxFieldExprs {
+    pub base_bound: Vec<(HeapValue, HeapValue)>,
+}
+
+impl VMCtxFieldExprs {
+    fn field_to_base_bound(ctx: HeapValue, field: &VMCtxField) -> (HeapValue, HeapValue) {
+        match field {
             VMCtxField::StaticRegion {
                 base_ptr_vmctx_offset,
                 heap_and_guard_size,
             } => (
                 HeapValue::Load(Box::new(HeapValue::Add(
-                    Box::new(HeapValue::VMCtx),
+                    Box::new(ctx),
                     Box::new(HeapValue::Const(*base_ptr_vmctx_offset as i64)),
                 ))),
                 HeapValue::Const(*heap_and_guard_size as i64),
@@ -426,7 +585,7 @@ impl HeapValue {
                 element_size,
             } => {
                 let len = HeapValue::Load(Box::new(HeapValue::Add(
-                    Box::new(HeapValue::VMCtx),
+                    Box::new(ctx.clone()),
                     Box::new(HeapValue::Const(*len_vmctx_offset as i64)),
                 )));
                 let len = if *element_size != 1 {
@@ -437,31 +596,39 @@ impl HeapValue {
                 };
                 (
                     HeapValue::Load(Box::new(HeapValue::Add(
-                        Box::new(HeapValue::VMCtx),
+                        Box::new(ctx),
                         Box::new(HeapValue::Const(*base_ptr_vmctx_offset as i64)),
                     ))),
                     len,
                 )
             }
             VMCtxField::Field { offset, len } => {
-                // Should not be reachable at top level.
-                unreachable!()
+                let base = if *offset > 0 {
+                    HeapValue::Add(Box::new(ctx), Box::new(HeapValue::Const(*offset as i64)))
+                } else {
+                    ctx
+                };
+                let len = HeapValue::Const(*len as i64);
+                (base, len)
             }
             VMCtxField::Import {
                 ptr_vmctx_offset,
                 kind,
             } => {
-                todo!()
+                let ctx = HeapValue::Load(Box::new(HeapValue::Add(
+                    Box::new(ctx),
+                    Box::new(HeapValue::Const(*ptr_vmctx_offset as i64)),
+                )));
+                Self::field_to_base_bound(ctx, &*kind)
             }
-        };
-
-        todo!()
+        }
     }
-}
 
-pub enum Bounded<T> {
-    Static { max: u64 },
-    Dynamic { bound: T, scale: u8, offset: u64 },
-    TextPointer,
-    None,
+    pub fn new(fields: &[VMCtxField]) -> Self {
+        let base_bound = fields
+            .iter()
+            .map(|field| Self::field_to_base_bound(HeapValue::VMCtx, field))
+            .collect::<Vec<_>>();
+        Self { base_bound }
+    }
 }

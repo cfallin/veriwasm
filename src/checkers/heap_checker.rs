@@ -1,7 +1,7 @@
 use crate::analyses::{AbstractAnalyzer, AnalysisResult, HeapAnalyzer};
 use crate::checkers::Checker;
 use crate::ir::types::*;
-use crate::lattices::heaplattice::{HeapLattice, HeapValue, HeapValueLattice};
+use crate::lattices::heaplattice::{HeapLattice, HeapValue, HeapValueLattice, VMCtxFieldExprs};
 use crate::lattices::LocIdx;
 use crate::VMCtxField;
 use crate::ValidationError;
@@ -17,6 +17,7 @@ pub struct HeapChecker<'a> {
     name_addr_map: &'a HashMap<u64, String>,
     vmctx_size: usize,
     fields: &'a [VMCtxField],
+    base_bounds: VMCtxFieldExprs,
 }
 
 pub fn check_heap(
@@ -27,12 +28,14 @@ pub fn check_heap(
     vmctx_size: usize,
     fields: &[VMCtxField],
 ) -> Result<(), ValidationError> {
+    let base_bounds = VMCtxFieldExprs::new(fields);
     HeapChecker {
         irmap,
         analyzer,
         name_addr_map,
         vmctx_size,
         fields,
+        base_bounds,
     }
     .check(result)
 }
@@ -83,14 +86,21 @@ impl Checker<HeapLattice> for HeapChecker<'_> {
         loc_idx: &LocIdx,
     ) -> Result<(), ValidationError> {
         match ir_stmt {
-            Stmt::Call(v) => {}
-            // Check stores.
-            Stmt::Unop(_, dst @ Value::Mem(_, mem), _)
-            | Stmt::Binop(_, dst @ Value::Mem(_, mem), _, _)
-            | Stmt::Clear(dst @ Value::Mem(_, mem), _) => {
+            // Check stores and loads.
+            Stmt::Unop(_, dst @ Value::Mem(sz, mem), _)
+            | Stmt::Binop(_, dst @ Value::Mem(sz, mem), _, _)
+            | Stmt::Clear(dst @ Value::Mem(sz, mem), _) => {
                 if !dst.is_stack_access() && !dst.is_frame_access() {
                     let value = self.analyzer.aeval_memargs(state, mem);
-                    self.check_heap_access(value, loc_idx)?;
+                    self.check_heap_access(*sz, value, loc_idx)?;
+                }
+            }
+            Stmt::Unop(_, _, src @ Value::Mem(sz, mem))
+            | Stmt::Binop(_, _, src @ Value::Mem(sz, mem), _)
+            | Stmt::Binop(_, _, _, src @ Value::Mem(sz, mem)) => {
+                if !src.is_stack_access() && !src.is_frame_access() {
+                    let value = self.analyzer.aeval_memargs(state, mem);
+                    self.check_heap_access(*sz, value, loc_idx)?;
                 }
             }
             _ => (),
@@ -102,10 +112,19 @@ impl Checker<HeapLattice> for HeapChecker<'_> {
 impl HeapChecker<'_> {
     fn check_heap_access(
         &self,
+        sz: ValSize,
         addr: HeapValueLattice,
         loc_idx: &LocIdx,
     ) -> Result<(), ValidationError> {
-        todo!();
-        Ok(())
+        let addr = match addr.v {
+            Some(addr) => addr,
+            None => return Err(ValidationError::HeapUnsafe),
+        };
+        for (base, bound) in &self.base_bounds.base_bound {
+            if addr.addr_ok(base, bound, sz.into_bytes() as usize) {
+                return Ok(());
+            }
+        }
+        Err(ValidationError::HeapUnsafe)
     }
 }

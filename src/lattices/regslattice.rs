@@ -11,6 +11,7 @@ use X86Regs::*;
 #[derive(Default, PartialEq, Eq, Clone, Debug)]
 pub struct X86RegsLattice<T> {
     pub map: HashMap<X86Regs, VarSlot<T>>,
+    pub flags_cmp: Option<(T, T)>,
 }
 
 fn hashmap_le<T: PartialOrd>(s1: &X86RegsLattice<T>, s2: &X86RegsLattice<T>) -> bool {
@@ -127,86 +128,13 @@ impl<T: Lattice + Clone> Lattice for X86RegsLattice<T> {
                 None => (), // this means v2 = ⊥ so v1 ∧ v2 = ⊥
             }
         }
-        X86RegsLattice { map: newmap }
+        let flags_cmp = match (self.flags_cmp.clone(), other.flags_cmp.clone()) {
+            (Some(x), Some(y)) if x == y => Some(x),
+            _ => None,
+        };
+        X86RegsLattice {
+            map: newmap,
+            flags_cmp,
+        }
     }
 }
-
-// TODO: put this back
-// #[test]
-// fn regs_lattice_test() {
-//     use crate::lattices::BooleanLattice;
-
-//     let r1 = X86RegsLattice {
-//         rax: BooleanLattice { v: false },
-//         rbx: BooleanLattice { v: false },
-//         rcx: BooleanLattice { v: false },
-//         rdx: BooleanLattice { v: false },
-//         rdi: BooleanLattice { v: false },
-//         rsi: BooleanLattice { v: false },
-//         rsp: BooleanLattice { v: false },
-//         rbp: BooleanLattice { v: false },
-//         r8: BooleanLattice { v: false },
-//         r9: BooleanLattice { v: false },
-//         r10: BooleanLattice { v: false },
-//         r11: BooleanLattice { v: false },
-//         r12: BooleanLattice { v: false },
-//         r13: BooleanLattice { v: false },
-//         r14: BooleanLattice { v: false },
-//         r15: BooleanLattice { v: false },
-//         zf: BooleanLattice { v: false },
-//     };
-
-//     let r2 = X86RegsLattice {
-//         rax: BooleanLattice { v: true },
-//         rbx: BooleanLattice { v: false },
-//         rcx: BooleanLattice { v: false },
-//         rdx: BooleanLattice { v: false },
-//         rdi: BooleanLattice { v: false },
-//         rsi: BooleanLattice { v: false },
-//         rsp: BooleanLattice { v: false },
-//         rbp: BooleanLattice { v: false },
-//         r8: BooleanLattice { v: false },
-//         r9: BooleanLattice { v: false },
-//         r10: BooleanLattice { v: false },
-//         r11: BooleanLattice { v: false },
-//         r12: BooleanLattice { v: false },
-//         r13: BooleanLattice { v: false },
-//         r14: BooleanLattice { v: false },
-//         r15: BooleanLattice { v: false },
-//         zf: BooleanLattice { v: false },
-//     };
-
-//     let r3 = X86RegsLattice {
-//         rax: BooleanLattice { v: false },
-//         rbx: BooleanLattice { v: true },
-//         rcx: BooleanLattice { v: false },
-//         rdx: BooleanLattice { v: false },
-//         rdi: BooleanLattice { v: false },
-//         rsi: BooleanLattice { v: false },
-//         rsp: BooleanLattice { v: false },
-//         rbp: BooleanLattice { v: false },
-//         r8: BooleanLattice { v: false },
-//         r9: BooleanLattice { v: false },
-//         r10: BooleanLattice { v: false },
-//         r11: BooleanLattice { v: false },
-//         r12: BooleanLattice { v: false },
-//         r13: BooleanLattice { v: false },
-//         r14: BooleanLattice { v: false },
-//         r15: BooleanLattice { v: false },
-//         zf: BooleanLattice { v: false },
-//     };
-
-//     assert_eq!(r2.rax > r2.rbx, true);
-//     assert_eq!(r2.rax < r2.rbx, false);
-//     assert_eq!(r2.rax.gt(&r2.rbx), true);
-//     assert_eq!(r2.rbx == r2.rdi, true);
-
-//     assert_eq!(r1 < r2, true);
-//     assert_eq!(r1 <= r2, true);
-
-//     assert_eq!(r2 < r3, false);
-//     assert_eq!(r2 <= r3, false);
-
-//     assert_eq!(r2.meet(&r3, &LocIdx { addr: 0, idx: 0 }) == r1, true);
-//     assert_eq!(r1.meet(&r2, &LocIdx { addr: 0, idx: 0 }) == r1, true);
-// }
